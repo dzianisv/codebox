@@ -1,2 +1,7 @@
 .DS_Store
 node_modules
+*.log
+*.tmp
+.env
+.env.*
+.envrc
