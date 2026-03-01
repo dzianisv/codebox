@@ -18,7 +18,6 @@ type Options = {
   envVars: Record<string, string>;
   assumeYes: boolean;
   verbose: boolean;
-  cargoJobs: number;
   dryRun: boolean;
   configPath: string;
 };
@@ -42,7 +41,6 @@ Options:
   --env <NAME>                Also sync a specific env var (repeatable)
   --env-prefix <PREFIX>       Sync env vars with this prefix (repeatable)
   --yes                       Assume yes for prompts (env/ssh sync)
-  --cargo-jobs <n>            Set CARGO_BUILD_JOBS (default: 1)
   -v, --verbose               Verbose rsync output (progress)
   --dry-run                   Print actions without executing
 
@@ -318,15 +316,6 @@ async function main() {
 
   const assumeYes = hasFlag(args, "--yes");
   const verbose = hasFlag(args, "--verbose") || hasFlag(args, "-v");
-  const cargoJobsRaw = argValue(args, "--cargo-jobs") ?? process.env.CARGO_JOBS;
-  let cargoJobs = 1;
-  if (cargoJobsRaw) {
-    const parsed = Number.parseInt(cargoJobsRaw, 10);
-    if (!Number.isFinite(parsed) || parsed < 1) {
-      throw new Error("Invalid --cargo-jobs value. Must be an integer >= 1.");
-    }
-    cargoJobs = parsed;
-  }
 
   const base = argValue(args, "--base") ?? process.env.BASE ?? "$HOME/workspace";
   const opencodeSrcArg = argValue(args, "--opencode-src") ?? process.env.OPENCODE_SRC;
@@ -349,7 +338,6 @@ async function main() {
     envVars: {},
     assumeYes,
     verbose,
-    cargoJobs,
     dryRun: hasFlag(args, "--dry-run"),
     configPath,
   };
@@ -544,7 +532,7 @@ EOF
 
 cd "$REPO_DIR"
 devbox install
-devbox run -- bash -lc "export CARGO_BUILD_JOBS=${opts.cargoJobs}; export RUSTFLAGS='-C linker=cc'; cargo build -p codex-cli"
+devbox run -- bash -lc "export RUSTFLAGS='-C linker=cc'; cargo build -p codex-cli"
 ln -sf "$REPO_DIR/codex-rs/target/debug/codex" ~/.local/bin/codex
 
 if [ -d "$OPENCODE_DIR" ]; then
