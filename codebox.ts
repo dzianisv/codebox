@@ -129,6 +129,10 @@ function collectEnvVars(args: string[]): Record<string, string> {
     }
     if (allPrefixes.some((p) => key.startsWith(p))) {
       out[key] = val;
+      continue;
+    }
+    if (key.endsWith("_TOKEN")) {
+      out[key] = val;
     }
   }
   return out;
