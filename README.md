@@ -26,4 +26,4 @@ If you don't pass `--remote`, the last used remote is loaded from:
 - Uses `rsync` and `ssh` under the hood.
 - Syncs `.git` by default so the remote is a real git repo.
 - Excludes `codex-rs/target*`, `node_modules`, `dist`, `.venv` by default.
-- Syncs env vars into remote `~/.bashrc` (defaults include `GITHUB_TOKEN`, `OPENAI_*`, `AZURE_OPENAI_*`, `OPENCODE_*`, `CODEX_*`). Use `--no-env`, `--env`, `--env-prefix` to control.
+- Syncs env vars into remote `~/.bashrc` (defaults include `GITHUB_TOKEN`, `OPENAI_*`, `AZURE_OPENAI_*`, `OPENCODE_*`, `CODEX_*`, and any `*_TOKEN`). Use `--no-env`, `--env`, `--env-prefix` to control.
