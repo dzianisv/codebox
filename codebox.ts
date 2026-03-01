@@ -16,6 +16,9 @@ type Options = {
   includeCodexHistory: boolean;
   syncEnv: boolean;
   envVars: Record<string, string>;
+  assumeYes: boolean;
+  verbose: boolean;
+  cargoJobs: number;
   dryRun: boolean;
   configPath: string;
 };
@@ -38,6 +41,9 @@ Options:
   --no-env                    Do NOT sync env vars to remote ~/.bashrc
   --env <NAME>                Also sync a specific env var (repeatable)
   --env-prefix <PREFIX>       Sync env vars with this prefix (repeatable)
+  --yes                       Assume yes for prompts (env/ssh sync)
+  --cargo-jobs <n>            Set CARGO_BUILD_JOBS (default: 1)
+  -v, --verbose               Verbose rsync output (progress)
   --dry-run                   Print actions without executing
 
 Example:
@@ -138,6 +144,93 @@ function collectEnvVars(args: string[]): Record<string, string> {
   return out;
 }
 
+function validateRemote(remote: string) {
+  if (/\s/.test(remote)) {
+    throw new Error("Remote must not contain whitespace.");
+  }
+  if (remote.startsWith("-")) {
+    throw new Error("Remote must not start with '-'.");
+  }
+}
+
+function expandTildeArg(arg: string): string {
+  if (arg.startsWith("~")) {
+    return expandHome(arg);
+  }
+  if (arg.includes("=~")) {
+    return arg.replace("=~", `=${os.homedir()}/`);
+  }
+  return arg;
+}
+
+function shellSplit(input: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: "'" | "\"" | null = null;
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+        i += 1;
+        continue;
+      }
+      if (ch === "\\" && quote === "\"") {
+        const next = input[i + 1];
+        if (next) {
+          cur += next;
+          i += 2;
+          continue;
+        }
+      }
+      cur += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      i += 1;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (cur) {
+        out.push(cur);
+        cur = "";
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < input.length) {
+      cur += input[i + 1];
+      i += 2;
+      continue;
+    }
+    cur += ch;
+    i += 1;
+  }
+  if (quote) {
+    throw new Error("Unterminated quote in --ssh-opts.");
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+async function promptYes(message: string, assumeYes: boolean): Promise<void> {
+  if (assumeYes) return;
+  if (!process.stdin.isTTY) {
+    throw new Error(`${message} Use --yes to proceed or disable the option.`);
+  }
+  process.stderr.write(`${message} Type 'yes' to continue: `);
+  process.stdin.setEncoding("utf8");
+  const input = await new Promise<string>((resolve) => {
+    process.stdin.once("data", (data) => resolve(String(data)));
+  });
+  if (input.trim().toLowerCase() !== "yes") {
+    throw new Error("Aborted.");
+  }
+}
+
 async function run(cmd: string[], opts?: { cwd?: string; stdin?: Uint8Array }) {
   if (opts?.stdin) {
     const proc = Bun.spawn({
@@ -174,6 +267,7 @@ function rsyncCmd(
   src: string,
   dest: string,
   excludes: string[] = [],
+  verbose = false,
 ) {
   const cmd = [
     "rsync",
@@ -181,9 +275,11 @@ function rsyncCmd(
     "--delete",
     "--human-readable",
     "--stats",
-    "-e",
-    `ssh ${sshOpts}`,
   ];
+  if (verbose) {
+    cmd.push("-v", "--info=progress2");
+  }
+  cmd.push("-e", `ssh ${sshOpts}`);
   for (const ex of excludes) {
     cmd.push("--exclude", ex);
   }
@@ -213,11 +309,24 @@ async function main() {
     console.log(usage());
     process.exit(2);
   }
+  validateRemote(remote);
 
   const sshOpts =
     argValue(args, "--ssh-opts") ??
     process.env.SSH_OPTS ??
     "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes";
+
+  const assumeYes = hasFlag(args, "--yes");
+  const verbose = hasFlag(args, "--verbose") || hasFlag(args, "-v");
+  const cargoJobsRaw = argValue(args, "--cargo-jobs") ?? process.env.CARGO_JOBS;
+  let cargoJobs = 1;
+  if (cargoJobsRaw) {
+    const parsed = Number.parseInt(cargoJobsRaw, 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      throw new Error("Invalid --cargo-jobs value. Must be an integer >= 1.");
+    }
+    cargoJobs = parsed;
+  }
 
   const base = argValue(args, "--base") ?? process.env.BASE ?? "$HOME/workspace";
   const opencodeSrcArg = argValue(args, "--opencode-src") ?? process.env.OPENCODE_SRC;
@@ -238,9 +347,19 @@ async function main() {
     includeCodexHistory: hasFlag(args, "--include-codex-history"),
     syncEnv: !hasFlag(args, "--no-env"),
     envVars: {},
+    assumeYes,
+    verbose,
+    cargoJobs,
     dryRun: hasFlag(args, "--dry-run"),
     configPath,
   };
+
+  if (opts.syncSshKeys) {
+    await promptYes(
+      "About to sync ~/.ssh (includes private keys) to the remote.",
+      opts.assumeYes,
+    );
+  }
 
   const repoRoot = resolve(process.cwd());
   const repoName = basename(repoRoot);
@@ -260,7 +379,13 @@ async function main() {
 
   actions.push({
     label: "sync repo",
-    cmd: rsyncCmd(opts.sshOpts, `${repoRoot}/`, `${opts.remote}:${remoteRepo}/`, repoExcludes),
+    cmd: rsyncCmd(
+      opts.sshOpts,
+      `${repoRoot}/`,
+      `${opts.remote}:${remoteRepo}/`,
+      repoExcludes,
+      opts.verbose,
+    ),
   });
 
   if (opts.opencodeSrc && existsSync(opts.opencodeSrc)) {
@@ -271,6 +396,7 @@ async function main() {
         `${opts.opencodeSrc}/`,
         `${opts.remote}:${opts.base}/opencode/`,
         [".git", "node_modules", "dist", ".venv"],
+        opts.verbose,
       ),
     });
   }
@@ -286,6 +412,7 @@ async function main() {
           `${codexDir}/`,
           `${opts.remote}:~/.codex/`,
           excludes,
+          opts.verbose,
         ),
       });
     }
@@ -301,6 +428,8 @@ async function main() {
           opts.sshOpts,
           `${opencodeConfig}/`,
           `${opts.remote}:~/.config/opencode/`,
+          [],
+          opts.verbose,
         ),
       });
     }
@@ -311,6 +440,8 @@ async function main() {
           opts.sshOpts,
           `${opencodeHome}/`,
           `${opts.remote}:~/.opencode/`,
+          [],
+          opts.verbose,
         ),
       });
     }
@@ -325,6 +456,8 @@ async function main() {
           opts.sshOpts,
           `${ghConfig}/`,
           `${opts.remote}:~/.config/gh/`,
+          [],
+          opts.verbose,
         ),
       });
     }
@@ -337,23 +470,30 @@ async function main() {
         label: "sync ~/.ssh (includes private keys)",
         cmd: rsyncCmd(opts.sshOpts, `${sshDir}/`, `${opts.remote}:~/.ssh/`, [
           "authorized_keys",
-        ]),
+        ], opts.verbose),
       });
     }
   }
 
   if (opts.syncEnv) {
     opts.envVars = collectEnvVars(args);
+    const envKeys = Object.keys(opts.envVars).sort();
+    if (envKeys.length > 0) {
+      const shown = envKeys.slice(0, 10);
+      const suffix = envKeys.length > 10 ? ` (+${envKeys.length - 10} more)` : "";
+      await promptYes(
+        `About to sync ${envKeys.length} env vars to remote ~/.bashrc: ${shown.join(", ")}${suffix}.`,
+        opts.assumeYes,
+      );
+    }
   }
 
   const devboxCodexJson = `{
   "packages": ["git","rustc","cargo","pkg-config","openssl","libcap","gcc","bun"]
-}
-`;
+}\n`;
   const devboxOpencodeJson = `{
   "packages": ["git","bun"]
-}
-`;
+}\n`;
 
   const envLines = Object.entries(opts.envVars)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -361,6 +501,7 @@ async function main() {
   const envBlock = envLines.length
     ? `# >>> codebox env >>>\n${envLines.join("\n")}\n# <<< codebox env <<<\n`
     : "";
+  const envDelimiter = `CODEBOX_ENV_${Math.random().toString(36).slice(2)}`;
   const envSetup = envBlock
     ? `BASHRC="$HOME/.bashrc"
 TMP_BASHRC="$(mktemp)"
@@ -372,8 +513,8 @@ if [ -f "$BASHRC" ]; then
 else
   : > "$TMP_BASHRC"
 fi
-cat >> "$TMP_BASHRC" <<'EOF'
-${envBlock}EOF
+cat >> "$TMP_BASHRC" <<'${envDelimiter}'
+${envBlock}${envDelimiter}
 mv "$TMP_BASHRC" "$BASHRC"
 
 `
@@ -382,8 +523,8 @@ mv "$TMP_BASHRC" "$BASHRC"
   const remoteScript = `#!/usr/bin/env bash
 set -euo pipefail
 
-REMOTE_BASE=${opts.base}
-REPO_NAME=${repoName}
+REMOTE_BASE=${bashQuote(opts.base)}
+REPO_NAME=${bashQuote(repoName)}
 REPO_DIR="$REMOTE_BASE/$REPO_NAME"
 OPENCODE_DIR="$REMOTE_BASE/opencode"
 
@@ -403,7 +544,7 @@ EOF
 
 cd "$REPO_DIR"
 devbox install
-devbox run -- bash -lc "export CARGO_BUILD_JOBS=1; export RUSTFLAGS='-C linker=cc'; cargo build -p codex-cli"
+devbox run -- bash -lc "export CARGO_BUILD_JOBS=${opts.cargoJobs}; export RUSTFLAGS='-C linker=cc'; cargo build -p codex-cli"
 ln -sf "$REPO_DIR/codex-rs/target/debug/codex" ~/.local/bin/codex
 
 if [ -d "$OPENCODE_DIR" ]; then
@@ -436,7 +577,8 @@ fi
   }
 
   const encoder = new TextEncoder();
-  const sshCmd = ["ssh", ...opts.sshOpts.split(" "), opts.remote, "bash", "-s"];
+  const sshArgs = shellSplit(opts.sshOpts).map(expandTildeArg);
+  const sshCmd = ["ssh", ...sshArgs, opts.remote, "bash", "-s"];
   await run(sshCmd, { stdin: encoder.encode(remoteScript) });
 }
 
