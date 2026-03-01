@@ -8,6 +8,13 @@ Devbox-powered workspace sync and bootstrap for remote Codex/OpenCode.
 curl -fsSL https://bun.sh/install | bash && npm install -g @dzianisv/codebox
 ```
 
+## Install (local repo)
+
+```sh
+cd /Users/engineer/workspace/codebox
+npm install -g .
+```
+
 ## Usage
 
 ```sh
