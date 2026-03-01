@@ -1,0 +1,33 @@
+{
+  "name": "@dzianisv/codebox",
+  "version": "0.1.0",
+  "description": "Devbox-powered workspace sync and bootstrap for remote Codex/OpenCode",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "codebox": "codebox.ts"
+  },
+  "files": [
+    "codebox.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "keywords": [
+    "devbox",
+    "codex",
+    "opencode",
+    "rsync",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dzianisv/codebox.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dzianisv/codebox/issues"
+  },
+  "homepage": "https://github.com/dzianisv/codebox#readme"
+}
