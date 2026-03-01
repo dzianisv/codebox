@@ -14,6 +14,8 @@ type Options = {
   syncGhConfig: boolean;
   syncSshKeys: boolean;
   includeCodexHistory: boolean;
+  syncEnv: boolean;
+  envVars: Record<string, string>;
   dryRun: boolean;
   configPath: string;
 };
@@ -33,6 +35,9 @@ Options:
   --no-gh-config              Skip syncing ~/.config/gh
   --sync-ssh                  Sync ~/.ssh (includes private keys) [off by default]
   --include-codex-history     Include ~/.codex/history.jsonl (default: excluded)
+  --no-env                    Do NOT sync env vars to remote ~/.bashrc
+  --env <NAME>                Also sync a specific env var (repeatable)
+  --env-prefix <PREFIX>       Sync env vars with this prefix (repeatable)
   --dry-run                   Print actions without executing
 
 Example:
@@ -44,6 +49,17 @@ function argValue(args: string[], name: string): string | undefined {
   const idx = args.indexOf(name);
   if (idx === -1) return undefined;
   return args[idx + 1];
+}
+
+function argValues(args: string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name && args[i + 1]) {
+      out.push(args[i + 1]);
+      i += 1;
+    }
+  }
+  return out;
 }
 
 function hasFlag(args: string[], name: string): boolean {
@@ -70,6 +86,52 @@ function writeConfig(path: string, data: Record<string, unknown>) {
   const dir = path.replace(/\/[^/]+$/, "");
   mkdirSync(dir, { recursive: true });
   writeFileSync(path, JSON.stringify(data, null, 2) + "\n");
+}
+
+function bashQuote(value: string): string {
+  const escaped = value
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, "\\n");
+  return `$'${escaped}'`;
+}
+
+function collectEnvVars(args: string[]): Record<string, string> {
+  const defaults = [
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENAI_ORG_ID",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_API_VERSION",
+    "OPENCODE_API_KEY",
+    "CODEX_API_KEY",
+  ];
+  const prefixes = [
+    "OPENAI_",
+    "AZURE_OPENAI_",
+    "OPENCODE_",
+    "CODEX_",
+  ];
+  const extraNames = argValues(args, "--env");
+  const extraPrefixes = argValues(args, "--env-prefix");
+
+  const allow = new Set<string>([...defaults, ...extraNames]);
+  const allPrefixes = [...prefixes, ...extraPrefixes];
+
+  const out: Record<string, string> = {};
+  for (const [key, val] of Object.entries(process.env)) {
+    if (val == null || val === "") continue;
+    if (allow.has(key)) {
+      out[key] = val;
+      continue;
+    }
+    if (allPrefixes.some((p) => key.startsWith(p))) {
+      out[key] = val;
+    }
+  }
+  return out;
 }
 
 async function run(cmd: string[], opts?: { cwd?: string; stdin?: Uint8Array }) {
@@ -170,6 +232,8 @@ async function main() {
     syncGhConfig: !hasFlag(args, "--no-gh-config"),
     syncSshKeys: hasFlag(args, "--sync-ssh"),
     includeCodexHistory: hasFlag(args, "--include-codex-history"),
+    syncEnv: !hasFlag(args, "--no-env"),
+    envVars: {},
     dryRun: hasFlag(args, "--dry-run"),
     configPath,
   };
@@ -274,8 +338,42 @@ async function main() {
     }
   }
 
-  const devboxCodexJson = `{"\n  \"packages\": [\"git\",\"rustc\",\"cargo\",\"pkg-config\",\"openssl\",\"libcap\",\"gcc\",\"bun\"]\n}\n`;
-  const devboxOpencodeJson = `{"\n  \"packages\": [\"git\",\"bun\"]\n}\n`;
+  if (opts.syncEnv) {
+    opts.envVars = collectEnvVars(args);
+  }
+
+  const devboxCodexJson = `{
+  "packages": ["git","rustc","cargo","pkg-config","openssl","libcap","gcc","bun"]
+}
+`;
+  const devboxOpencodeJson = `{
+  "packages": ["git","bun"]
+}
+`;
+
+  const envLines = Object.entries(opts.envVars)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `export ${k}=${bashQuote(v)}`);
+  const envBlock = envLines.length
+    ? `# >>> codebox env >>>\n${envLines.join("\n")}\n# <<< codebox env <<<\n`
+    : "";
+  const envSetup = envBlock
+    ? `BASHRC="$HOME/.bashrc"
+TMP_BASHRC="$(mktemp)"
+if [ -f "$BASHRC" ]; then
+  awk 'BEGIN{skip=0}
+    /# >>> codebox env >>>/ {skip=1}
+    /# <<< codebox env <<</ {skip=0; next}
+    !skip {print}' "$BASHRC" > "$TMP_BASHRC"
+else
+  : > "$TMP_BASHRC"
+fi
+cat >> "$TMP_BASHRC" <<'EOF'
+${envBlock}EOF
+mv "$TMP_BASHRC" "$BASHRC"
+
+`
+    : "";
 
   const remoteScript = `#!/usr/bin/env bash
 set -euo pipefail
@@ -285,7 +383,7 @@ REPO_NAME=${repoName}
 REPO_DIR="$REMOTE_BASE/$REPO_NAME"
 OPENCODE_DIR="$REMOTE_BASE/opencode"
 
-if ! command -v devbox >/dev/null 2>&1; then
+${envSetup}if ! command -v devbox >/dev/null 2>&1; then
   curl -fsSL https://get.jetpack.io/devbox | bash -s -- -f
 fi
 
