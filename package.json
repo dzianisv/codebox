@@ -5,15 +5,20 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "codebox": "codebox.ts"
+    "codebox": "bin/codebox"
   },
   "files": [
+    "bin/codebox",
     "codebox.ts",
     "README.md",
     "LICENSE"
   ],
   "engines": {
     "bun": ">=1.0.0"
+  },
+  "scripts": {
+    "test": "node tests/integration/install.test.mjs",
+    "install:devbox": "bun run scripts/install-devbox.ts"
   },
   "keywords": [
     "devbox",

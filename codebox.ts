@@ -25,9 +25,10 @@ type Options = {
 function usage(): string {
   return `Usage:
   ./codebox.ts --remote <user@host> [options]
+  ./codebox.ts ssh [<user@host>] [options] [-- <remote command...>]
 
 Options:
-  --remote <user@host>        Required SSH target
+  --remote <user@host>        SSH target (required for sync mode)
   --ssh-opts <string>         SSH options (default: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes")
   --base <path>               Remote base dir (default: "$HOME/workspace")
   --opencode-src <path>       Local opencode repo path (default: ~/workspace/opencode if exists)
@@ -46,6 +47,8 @@ Options:
 
 Example:
   ./codebox.ts --remote azureuser@dev-1 --base '$HOME/workspace'
+  ./codebox.ts ssh azureuser@dev-1
+  ./codebox.ts ssh --remote azureuser@dev-1 -- git status -sb
 `;
 }
 
@@ -214,6 +217,30 @@ function shellSplit(input: string): string[] {
   return out;
 }
 
+function firstPositionalArg(args: string[]): string | undefined {
+  const takesValue = new Set([
+    "--remote",
+    "--ssh-opts",
+    "--base",
+    "--opencode-src",
+    "--config",
+    "--env",
+    "--env-prefix",
+  ]);
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--") break;
+    if (takesValue.has(arg)) {
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    return arg;
+  }
+  return undefined;
+}
+
 async function promptYes(message: string, assumeYes: boolean): Promise<void> {
   if (assumeYes) return;
   if (!process.stdin.isTTY) {
@@ -238,9 +265,23 @@ async function run(cmd: string[], opts?: { cwd?: string; stdin?: Uint8Array }) {
       stderr: "inherit",
       cwd: opts?.cwd,
     });
-    const writer = proc.stdin!.getWriter();
-    await writer.write(opts.stdin);
-    await writer.close();
+    const stdin = proc.stdin as unknown as {
+      write?: (chunk: Uint8Array) => unknown;
+      end?: () => unknown;
+      getWriter?: () => WritableStreamDefaultWriter<Uint8Array>;
+    };
+    if (stdin && typeof stdin.write === "function") {
+      stdin.write(opts.stdin);
+      if (typeof stdin.end === "function") {
+        stdin.end();
+      }
+    } else if (stdin && typeof stdin.getWriter === "function") {
+      const writer = stdin.getWriter();
+      await writer.write(opts.stdin);
+      await writer.close();
+    } else {
+      throw new Error(`Unable to pipe stdin for command: ${cmd.join(" ")}`);
+    }
     const code = await proc.exited;
     if (code !== 0) {
       throw new Error(`Command failed (${code}): ${cmd.join(" ")}`);
@@ -286,7 +327,16 @@ function rsyncCmd(
 }
 
 async function main() {
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
+  const mode = rawArgs[0] === "ssh" ? "ssh" : "sync";
+  let args = mode === "ssh" ? rawArgs.slice(1) : rawArgs;
+  let sshExecArgs: string[] = [];
+  const sshCommandSep = args.indexOf("--");
+  if (sshCommandSep !== -1) {
+    sshExecArgs = args.slice(sshCommandSep + 1);
+    args = args.slice(0, sshCommandSep);
+  }
+
   if (args.includes("-h") || args.includes("--help")) {
     console.log(usage());
     process.exit(0);
@@ -298,8 +348,10 @@ async function main() {
     expandHome("~/.config/codebox.json");
   const existingConfig = readConfig(configPath);
 
+  const positionalRemote = mode === "ssh" ? firstPositionalArg(args) : undefined;
   const remote =
     argValue(args, "--remote") ??
+    positionalRemote ??
     process.env.REMOTE ??
     (typeof existingConfig.last_remote === "string" ? existingConfig.last_remote : undefined);
   if (!remote) {
@@ -352,6 +404,37 @@ async function main() {
   const repoRoot = resolve(process.cwd());
   const repoName = basename(repoRoot);
   const remoteRepo = `${opts.base}/${repoName}`;
+
+  if (mode === "ssh") {
+    const remoteTarget = `${opts.base}/${repoName}`;
+    const remoteCd = `if [ -d ${remoteTarget} ]; then cd ${remoteTarget}; fi`;
+    const remoteCommand =
+      sshExecArgs.length > 0
+        ? `${remoteCd}; exec ${sshExecArgs.map((part) => bashQuote(part)).join(" ")}`
+        : `${remoteCd}; exec bash -l`;
+    const sshArgs = shellSplit(opts.sshOpts).map(expandTildeArg);
+    const remoteInvocation = `bash -lc ${bashQuote(remoteCommand)}`;
+    const sshCmd = ["ssh", ...sshArgs];
+    if (sshExecArgs.length === 0) {
+      sshCmd.push("-t");
+    }
+    sshCmd.push(opts.remote, remoteInvocation);
+
+    if (opts.dryRun) {
+      console.log(`[dry-run] ${sshCmd.join(" ")}`);
+      return;
+    }
+
+    writeConfig(opts.configPath, {
+      ...existingConfig,
+      last_remote: opts.remote,
+      last_base: opts.base,
+      last_repo: repoName,
+      updated_at: new Date().toISOString(),
+    });
+    await run(sshCmd);
+    return;
+  }
 
   const repoExcludes = [
     "codex-rs/target*",
@@ -508,10 +591,17 @@ mv "$TMP_BASHRC" "$BASHRC"
 `
     : "";
 
-  const remoteScript = `#!/usr/bin/env bash
+const remoteScript = `#!/usr/bin/env bash
 set -euo pipefail
 
-REMOTE_BASE=${bashQuote(opts.base)}
+BASE_INPUT=${bashQuote(opts.base)}
+case "$BASE_INPUT" in
+  '$HOME') REMOTE_BASE="$HOME" ;;
+  '$HOME'/*) REMOTE_BASE="$HOME/\${BASE_INPUT:6}" ;;
+  "~") REMOTE_BASE="$HOME" ;;
+  "~/"*) REMOTE_BASE="$HOME/\${BASE_INPUT#~/}" ;;
+  *) REMOTE_BASE="$BASE_INPUT" ;;
+esac
 REPO_NAME=${bashQuote(repoName)}
 REPO_DIR="$REMOTE_BASE/$REPO_NAME"
 OPENCODE_DIR="$REMOTE_BASE/opencode"
@@ -532,14 +622,24 @@ EOF
 
 cd "$REPO_DIR"
 devbox install
-devbox run -- bash -lc "export RUSTFLAGS='-C linker=cc'; cargo build -p codex-cli"
-ln -sf "$REPO_DIR/codex-rs/target/debug/codex" ~/.local/bin/codex
+if [ -f "$REPO_DIR/codex-rs/Cargo.toml" ]; then
+  devbox run -- bash -lc "export RUSTFLAGS='-C linker=cc'; cargo build -p codex-cli --manifest-path codex-rs/Cargo.toml"
+  ln -sf "$REPO_DIR/codex-rs/target/debug/codex" ~/.local/bin/codex
+else
+  echo "Info: skipping codex-cli build; codex-rs/Cargo.toml not found in $REPO_DIR"
+fi
 
 if [ -d "$OPENCODE_DIR" ]; then
   cd "$OPENCODE_DIR"
   devbox install
   if [ -x "./scripts/install-local.sh" ]; then
-    devbox run -- bash -lc "./scripts/install-local.sh"
+    if grep -qE '^(<<<<<<< |=======|>>>>>>> )' ./scripts/install-local.sh; then
+      echo "Warning: skipping ./scripts/install-local.sh due to merge-conflict markers."
+    else
+      if ! devbox run -- bash -lc "./scripts/install-local.sh"; then
+        echo "Warning: ./scripts/install-local.sh failed; continuing bootstrap."
+      fi
+    fi
   fi
 fi
 `;
