@@ -8,6 +8,9 @@ type Options = {
   sshOpts: string;
   base: string;
   opencodeSrc?: string;
+  opencodeTunnel: boolean;
+  opencodeLocalPort: number;
+  opencodeRemotePort: number;
   syncGit: boolean;
   syncCodexConfig: boolean;
   syncOpencodeConfig: boolean;
@@ -25,13 +28,16 @@ type Options = {
 function usage(): string {
   return `Usage:
   ./codebox.ts --remote <user@host> [options]
-  ./codebox.ts ssh [<user@host>] [options] [-- <remote command...>]
+  ./codebox.ts ssh [<user@host>] [options] [ssh-options] [-- <remote command...>]
 
 Options:
   --remote <user@host>        SSH target (required for sync mode)
   --ssh-opts <string>         SSH options (default: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes")
   --base <path>               Remote base dir (default: "$HOME/workspace")
   --opencode-src <path>       Local opencode repo path (default: ~/workspace/opencode if exists)
+  --no-opencode-tunnel        Skip auto-starting localhost SSH tunnel to remote OpenCode
+  --opencode-local-port <n>   Local forwarded port (default: 5551)
+  --opencode-remote-port <n>  Remote OpenCode port (default: 5551)
   --no-git                    Do NOT sync .git (default: sync .git)
   --no-codex-config           Skip syncing ~/.codex
   --no-opencode-config        Skip syncing ~/.config/opencode and ~/.opencode
@@ -45,9 +51,13 @@ Options:
   -v, --verbose               Verbose rsync output (progress)
   --dry-run                   Print actions without executing
 
+SSH mode:
+  Unrecognized ssh-mode flags are passed through to ssh (for example: -L, -R, -D, -N, -p, -i).
+
 Example:
   ./codebox.ts --remote azureuser@dev-1 --base '$HOME/workspace'
   ./codebox.ts ssh azureuser@dev-1
+  ./codebox.ts ssh -L 4097:127.0.0.1:4097 -N
   ./codebox.ts ssh --remote azureuser@dev-1 -- git status -sb
 `;
 }
@@ -164,6 +174,15 @@ function expandTildeArg(arg: string): string {
   return arg;
 }
 
+function parsePort(raw: string | undefined, name: string, fallback: number): number {
+  const text = (raw ?? `${fallback}`).trim();
+  const value = Number.parseInt(text, 10);
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error(`Invalid ${name}: "${text}" (expected 1-65535)`);
+  }
+  return value;
+}
+
 function shellSplit(input: string): string[] {
   const out: string[] = [];
   let cur = "";
@@ -217,28 +236,101 @@ function shellSplit(input: string): string[] {
   return out;
 }
 
-function firstPositionalArg(args: string[]): string | undefined {
+type ParsedSshModeArgs = {
+  args: string[];
+  positionalRemote?: string;
+  sshPassthroughArgs: string[];
+  sshExecArgs: string[];
+};
+
+function parseSshModeArgs(rawArgs: string[]): ParsedSshModeArgs {
+  const commandSep = rawArgs.indexOf("--");
+  const args = commandSep === -1 ? rawArgs : rawArgs.slice(0, commandSep);
+  const explicitExecArgs = commandSep === -1 ? [] : rawArgs.slice(commandSep + 1);
+
   const takesValue = new Set([
     "--remote",
     "--ssh-opts",
     "--base",
     "--opencode-src",
+    "--opencode-local-port",
+    "--opencode-remote-port",
     "--config",
     "--env",
     "--env-prefix",
   ]);
+  const boolFlags = new Set([
+    "--no-opencode-tunnel",
+    "--no-git",
+    "--no-codex-config",
+    "--no-opencode-config",
+    "--no-gh-config",
+    "--sync-ssh",
+    "--include-codex-history",
+    "--no-env",
+    "--yes",
+    "--verbose",
+    "-v",
+    "--dry-run",
+  ]);
+  const sshFlagsWithValue = new Set([
+    "-B",
+    "-b",
+    "-c",
+    "-D",
+    "-E",
+    "-F",
+    "-I",
+    "-i",
+    "-J",
+    "-L",
+    "-l",
+    "-m",
+    "-O",
+    "-o",
+    "-p",
+    "-Q",
+    "-R",
+    "-S",
+    "-W",
+    "-w",
+  ]);
+
+  const sshPassthroughArgs: string[] = [];
+  const implicitExecArgs: string[] = [];
+  let positionalRemote: string | undefined;
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (arg === "--") break;
     if (takesValue.has(arg)) {
       i += 1;
       continue;
     }
-    if (arg.startsWith("-")) continue;
-    return arg;
+    if (boolFlags.has(arg)) {
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      sshPassthroughArgs.push(arg);
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      sshPassthroughArgs.push(arg);
+      if (sshFlagsWithValue.has(arg) && args[i + 1]) {
+        sshPassthroughArgs.push(args[i + 1]);
+        i += 1;
+      }
+      continue;
+    }
+
+    if (!positionalRemote) {
+      positionalRemote = arg;
+      continue;
+    }
+    implicitExecArgs.push(arg);
   }
-  return undefined;
+
+  const sshExecArgs = explicitExecArgs.length > 0 ? explicitExecArgs : implicitExecArgs;
+  return { args, positionalRemote, sshPassthroughArgs, sshExecArgs };
 }
 
 async function promptYes(message: string, assumeYes: boolean): Promise<void> {
@@ -301,6 +393,131 @@ async function run(cmd: string[], opts?: { cwd?: string; stdin?: Uint8Array }) {
   }
 }
 
+async function runCapture(
+  cmd: string[],
+  opts?: { cwd?: string },
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn({
+    cmd,
+    stdout: "pipe",
+    stderr: "pipe",
+    cwd: opts?.cwd,
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, stdout, stderr };
+}
+
+async function listListeningPids(port: number): Promise<number[]> {
+  const result = await runCapture([
+    "lsof",
+    "-nP",
+    `-iTCP:${port}`,
+    "-sTCP:LISTEN",
+    "-t",
+  ]);
+  if (result.code !== 0) return [];
+  return result.stdout
+    .trim()
+    .split(/\s+/)
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+async function describePid(pid: number): Promise<string> {
+  const result = await runCapture(["ps", "-p", `${pid}`, "-o", "command="]);
+  const command = result.stdout.trim();
+  if (!command) return `pid=${pid}`;
+  return `pid=${pid} cmd=${command}`;
+}
+
+async function getPortUsageSummary(port: number): Promise<string | null> {
+  const pids = await listListeningPids(port);
+  if (pids.length === 0) return null;
+  const details: string[] = [];
+  for (const pid of pids) {
+    details.push(await describePid(pid));
+  }
+  return details.join(" | ");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildTunnelCommand(params: {
+  remote: string;
+  sshOpts: string;
+  localPort: number;
+  remotePort: number;
+}): string[] {
+  const sshArgs = shellSplit(params.sshOpts).map(expandTildeArg);
+  return [
+    "ssh",
+    ...sshArgs,
+    "-f",
+    "-N",
+    "-o",
+    "ExitOnForwardFailure=yes",
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=3",
+    "-L",
+    `${params.localPort}:127.0.0.1:${params.remotePort}`,
+    params.remote,
+  ];
+}
+
+async function ensureBackgroundTunnel(params: {
+  remote: string;
+  sshOpts: string;
+  localPort: number;
+  remotePort: number;
+}): Promise<void> {
+  const pids = await listListeningPids(params.localPort);
+  if (pids.length > 0) {
+    let hasExpectedTunnel = false;
+    for (const pid of pids) {
+      const desc = await describePid(pid);
+      const isSshProcess = /(^|\s)ssh(\s|$)/.test(desc);
+      if (
+        isSshProcess &&
+        desc.includes(params.remote) &&
+        desc.includes(`${params.localPort}:127.0.0.1:${params.remotePort}`)
+      ) {
+        hasExpectedTunnel = true;
+        break;
+      }
+    }
+    if (hasExpectedTunnel) {
+      console.log(
+        `[codebox] Reusing existing OpenCode tunnel on localhost:${params.localPort}`,
+      );
+      return;
+    }
+    const usage = await getPortUsageSummary(params.localPort);
+    throw new Error(
+      `Cannot start OpenCode tunnel: localhost:${params.localPort} is already in use (${usage ?? "unknown process"}).`,
+    );
+  }
+
+  await run(buildTunnelCommand(params));
+
+  for (let attempt = 1; attempt <= 15; attempt += 1) {
+    const usage = await getPortUsageSummary(params.localPort);
+    if (usage) return;
+    await sleep(200);
+  }
+
+  throw new Error(
+    `SSH tunnel command returned but localhost:${params.localPort} is not listening.`,
+  );
+}
+
 function rsyncCmd(
   sshOpts: string,
   src: string,
@@ -331,10 +548,14 @@ async function main() {
   const mode = rawArgs[0] === "ssh" ? "ssh" : "sync";
   let args = mode === "ssh" ? rawArgs.slice(1) : rawArgs;
   let sshExecArgs: string[] = [];
-  const sshCommandSep = args.indexOf("--");
-  if (sshCommandSep !== -1) {
-    sshExecArgs = args.slice(sshCommandSep + 1);
-    args = args.slice(0, sshCommandSep);
+  let sshPassthroughArgs: string[] = [];
+  let positionalRemote: string | undefined;
+  if (mode === "ssh") {
+    const parsedSshArgs = parseSshModeArgs(args);
+    args = parsedSshArgs.args;
+    sshExecArgs = parsedSshArgs.sshExecArgs;
+    sshPassthroughArgs = parsedSshArgs.sshPassthroughArgs;
+    positionalRemote = parsedSshArgs.positionalRemote;
   }
 
   if (args.includes("-h") || args.includes("--help")) {
@@ -348,7 +569,9 @@ async function main() {
     expandHome("~/.config/codebox.json");
   const existingConfig = readConfig(configPath);
 
-  const positionalRemote = mode === "ssh" ? firstPositionalArg(args) : undefined;
+  if (mode !== "ssh") {
+    positionalRemote = undefined;
+  }
   const remote =
     argValue(args, "--remote") ??
     positionalRemote ??
@@ -378,12 +601,25 @@ async function main() {
   const opencodeSrcDefault = resolve(expandHome("~/workspace/opencode"));
   const opencodeSrc =
     opencodeSrcArg ?? (existsSync(opencodeSrcDefault) ? opencodeSrcDefault : undefined);
+  const opencodeLocalPort = parsePort(
+    argValue(args, "--opencode-local-port") ?? process.env.OPENCODE_LOCAL_PORT,
+    "--opencode-local-port",
+    5551,
+  );
+  const opencodeRemotePort = parsePort(
+    argValue(args, "--opencode-remote-port") ?? process.env.OPENCODE_REMOTE_PORT,
+    "--opencode-remote-port",
+    5551,
+  );
 
   const opts: Options = {
     remote,
     sshOpts,
     base,
     opencodeSrc,
+    opencodeTunnel: !hasFlag(args, "--no-opencode-tunnel"),
+    opencodeLocalPort,
+    opencodeRemotePort,
     syncGit: !hasFlag(args, "--no-git"),
     syncCodexConfig: !hasFlag(args, "--no-codex-config"),
     syncOpencodeConfig: !hasFlag(args, "--no-opencode-config"),
@@ -416,13 +652,25 @@ async function main() {
       sshExecArgs.length > 0
         ? `${remoteCd}; exec ${sshExecArgs.map((part) => bashQuote(part)).join(" ")}`
         : `${remoteCd}; exec bash -l`;
-    const sshArgs = shellSplit(opts.sshOpts).map(expandTildeArg);
+    const sshArgs = [
+      ...shellSplit(opts.sshOpts).map(expandTildeArg),
+      ...sshPassthroughArgs.map(expandTildeArg),
+    ];
+    const disableRemoteCommand = sshArgs.includes("-N");
+    const disableTty = sshArgs.includes("-T");
+    if (disableRemoteCommand && sshExecArgs.length > 0) {
+      throw new Error("Cannot combine -N with a remote command.");
+    }
     const remoteInvocation = `bash -lc ${bashQuote(remoteCommand)}`;
     const sshCmd = ["ssh", ...sshArgs];
-    if (sshExecArgs.length === 0) {
-      sshCmd.push("-t");
+    if (disableRemoteCommand) {
+      sshCmd.push(opts.remote);
+    } else {
+      if (sshExecArgs.length === 0 && !disableTty) {
+        sshCmd.push("-t");
+      }
+      sshCmd.push(opts.remote, remoteInvocation);
     }
-    sshCmd.push(opts.remote, remoteInvocation);
 
     if (opts.dryRun) {
       console.log(`[dry-run] ${sshCmd.join(" ")}`);
@@ -609,6 +857,23 @@ esac
 REPO_NAME=${bashQuote(repoName)}
 REPO_DIR="$REMOTE_BASE/$REPO_NAME"
 OPENCODE_DIR="$REMOTE_BASE/opencode"
+OPENCODE_PORT=${bashQuote(String(opts.opencodeRemotePort))}
+
+is_port_listening() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn "( sport = :$1 )" 2>/dev/null | grep -q LISTEN
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$1$"
+    return $?
+  fi
+  return 1
+}
 
 ${envSetup}if ! command -v devbox >/dev/null 2>&1; then
   curl -fsSL https://get.jetpack.io/devbox | bash -s -- -f
@@ -646,6 +911,30 @@ if [ -d "$OPENCODE_DIR" ]; then
     fi
   fi
 fi
+
+if command -v opencode >/dev/null 2>&1; then
+  if is_port_listening "$OPENCODE_PORT"; then
+    echo "Info: OpenCode already listening on 127.0.0.1:$OPENCODE_PORT"
+  else
+    mkdir -p "$HOME/.cache/codebox"
+    nohup opencode serve --hostname 127.0.0.1 --port "$OPENCODE_PORT" \
+      > "$HOME/.cache/codebox/opencode-serve.log" 2>&1 &
+    echo "Info: started OpenCode serve on 127.0.0.1:$OPENCODE_PORT (log: ~/.cache/codebox/opencode-serve.log)"
+  fi
+
+  for _ in $(seq 1 25); do
+    if is_port_listening "$OPENCODE_PORT"; then
+      break
+    fi
+    sleep 1
+  done
+
+  if ! is_port_listening "$OPENCODE_PORT"; then
+    echo "Warning: OpenCode did not become ready on port $OPENCODE_PORT"
+  fi
+else
+  echo "Warning: opencode CLI not found on remote; skipping OpenCode serve startup."
+fi
 `;
 
   if (opts.dryRun) {
@@ -653,6 +942,15 @@ fi
       console.log(`[dry-run] ${a.label}: ${a.cmd.join(" ")}`);
     }
     console.log("[dry-run] remote script:\n" + remoteScript);
+    if (opts.opencodeTunnel) {
+      const tunnelCmd = buildTunnelCommand({
+        remote: opts.remote,
+        sshOpts: opts.sshOpts,
+        localPort: opts.opencodeLocalPort,
+        remotePort: opts.opencodeRemotePort,
+      });
+      console.log(`[dry-run] start OpenCode tunnel: ${tunnelCmd.join(" ")}`);
+    }
     return;
   }
 
@@ -672,6 +970,18 @@ fi
   const sshArgs = shellSplit(opts.sshOpts).map(expandTildeArg);
   const sshCmd = ["ssh", ...sshArgs, opts.remote, "bash", "-s"];
   await run(sshCmd, { stdin: encoder.encode(remoteScript) });
+
+  if (opts.opencodeTunnel) {
+    await ensureBackgroundTunnel({
+      remote: opts.remote,
+      sshOpts: opts.sshOpts,
+      localPort: opts.opencodeLocalPort,
+      remotePort: opts.opencodeRemotePort,
+    });
+    console.log(
+      `[codebox] OpenCode tunnel ready: http://127.0.0.1:${opts.opencodeLocalPort} -> ${opts.remote}:127.0.0.1:${opts.opencodeRemotePort}`,
+    );
+  }
 }
 
 main().catch((err) => {
