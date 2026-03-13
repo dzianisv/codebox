@@ -369,7 +369,11 @@ async function main() {
   const assumeYes = hasFlag(args, "--yes");
   const verbose = hasFlag(args, "--verbose") || hasFlag(args, "-v");
 
-  const base = argValue(args, "--base") ?? process.env.BASE ?? "$HOME/workspace";
+  const base =
+    argValue(args, "--base") ??
+    process.env.BASE ??
+    (typeof existingConfig.last_base === "string" ? existingConfig.last_base : undefined) ??
+    "$HOME/workspace";
   const opencodeSrcArg = argValue(args, "--opencode-src") ?? process.env.OPENCODE_SRC;
   const opencodeSrcDefault = resolve(expandHome("~/workspace/opencode"));
   const opencodeSrc =
