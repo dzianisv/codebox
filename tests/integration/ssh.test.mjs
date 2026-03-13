@@ -25,6 +25,13 @@ function runSsh(args) {
   });
 }
 
+function runTunnel(args) {
+  return spawnSync("bun", ["codebox.ts", "tunnel", ...args], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+}
+
 try {
   const tunnelOnly = runSsh([
     "-L",
@@ -61,6 +68,26 @@ try {
   assert.match(remoteOut, /\[dry-run\] ssh /);
   assert.match(remoteOut, /cached-user@cached-host bash -lc/);
   assert.match(remoteOut, /exec .*pwd/);
+
+  const tunnelCommand = runTunnel([
+    "--config",
+    configPath,
+    "--opencode-local-port",
+    "4901",
+    "--opencode-remote-port",
+    "4902",
+    "--dry-run",
+  ]);
+  assert.equal(
+    tunnelCommand.status,
+    0,
+    `Tunnel mode dry-run failed: ${tunnelCommand.stderr || tunnelCommand.stdout}`,
+  );
+  const tunnelModeOut = `${tunnelCommand.stdout}\n${tunnelCommand.stderr}`;
+  assert.match(tunnelModeOut, /\[dry-run\] ssh /);
+  assert.match(tunnelModeOut, /-f -N/);
+  assert.match(tunnelModeOut, /-L 4901:127\.0\.0\.1:4902/);
+  assert.match(tunnelModeOut, /cached-user@cached-host/);
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
 }

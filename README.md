@@ -35,12 +35,20 @@ If you don't pass `--remote`, the last used remote is loaded from:
 ~/.config/codebox.json
 ```
 
+Dedicated tunnel command (starts/reuses background tunnel and returns):
+
+```sh
+codebox tunnel
+codebox tunnel --opencode-local-port 4097 --opencode-remote-port 4097
+```
+
 ## Notes
 
 - Requires `bun` (the CLI uses a `#!/usr/bin/env bun` shebang).
 - Uses `rsync` and `ssh` under the hood.
 - `codebox ssh` auto-enters `$BASE/<current-folder>` on remote when that directory exists.
 - In `codebox ssh` mode, unknown flags are passed through to `ssh` (for example `-L`, `-R`, `-D`, `-N`, `-p`, `-i`).
+- `codebox tunnel` is the simplest way to pin the OpenCode tunnel in the background.
 - Syncs `.git` by default so the remote is a real git repo.
 - Excludes `codex-rs/target*`, `node_modules`, `dist`, `.venv` by default.
 - Syncs env vars into remote `~/.bashrc` (defaults include `GITHUB_TOKEN`, `OPENAI_*`, `AZURE_OPENAI_*`, `OPENCODE_*`, `CODEX_*`, and any `*_TOKEN`). Use `--no-env`, `--env`, `--env-prefix` to control.

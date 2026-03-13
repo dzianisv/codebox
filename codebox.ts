@@ -29,6 +29,7 @@ function usage(): string {
   return `Usage:
   ./codebox.ts --remote <user@host> [options]
   ./codebox.ts ssh [<user@host>] [options] [ssh-options] [-- <remote command...>]
+  ./codebox.ts tunnel [<user@host>] [options]
 
 Options:
   --remote <user@host>        SSH target (required for sync mode)
@@ -58,6 +59,8 @@ Example:
   ./codebox.ts --remote azureuser@dev-1 --base '$HOME/workspace'
   ./codebox.ts ssh azureuser@dev-1
   ./codebox.ts ssh -L 4097:127.0.0.1:4097 -N
+  ./codebox.ts tunnel
+  ./codebox.ts tunnel azureuser@dev-1 --opencode-local-port 4097 --opencode-remote-port 4097
   ./codebox.ts ssh --remote azureuser@dev-1 -- git status -sb
 `;
 }
@@ -234,6 +237,31 @@ function shellSplit(input: string): string[] {
   }
   if (cur) out.push(cur);
   return out;
+}
+
+function findPositionalRemote(args: string[]): string | undefined {
+  const takesValue = new Set([
+    "--remote",
+    "--ssh-opts",
+    "--base",
+    "--opencode-src",
+    "--opencode-local-port",
+    "--opencode-remote-port",
+    "--config",
+    "--env",
+    "--env-prefix",
+  ]);
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--") break;
+    if (takesValue.has(arg)) {
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    return arg;
+  }
+  return undefined;
 }
 
 type ParsedSshModeArgs = {
@@ -483,7 +511,7 @@ async function ensureBackgroundTunnel(params: {
     let hasExpectedTunnel = false;
     for (const pid of pids) {
       const desc = await describePid(pid);
-      const isSshProcess = /(^|\s)ssh(\s|$)/.test(desc);
+      const isSshProcess = /\bssh\b/.test(desc);
       if (
         isSshProcess &&
         desc.includes(params.remote) &&
@@ -545,11 +573,11 @@ function rsyncCmd(
 
 async function main() {
   const rawArgs = process.argv.slice(2);
-  const mode = rawArgs[0] === "ssh" ? "ssh" : "sync";
-  let args = mode === "ssh" ? rawArgs.slice(1) : rawArgs;
+  const mode = rawArgs[0] === "ssh" ? "ssh" : rawArgs[0] === "tunnel" ? "tunnel" : "sync";
+  let args = (mode === "ssh" || mode === "tunnel") ? rawArgs.slice(1) : rawArgs;
   let sshExecArgs: string[] = [];
   let sshPassthroughArgs: string[] = [];
-  let positionalRemote: string | undefined;
+  let positionalRemote: string | undefined = findPositionalRemote(args);
   if (mode === "ssh") {
     const parsedSshArgs = parseSshModeArgs(args);
     args = parsedSshArgs.args;
@@ -569,7 +597,7 @@ async function main() {
     expandHome("~/.config/codebox.json");
   const existingConfig = readConfig(configPath);
 
-  if (mode !== "ssh") {
+  if (mode === "sync") {
     positionalRemote = undefined;
   }
   const remote =
@@ -685,6 +713,38 @@ async function main() {
       updated_at: new Date().toISOString(),
     });
     await run(sshCmd);
+    return;
+  }
+
+  if (mode === "tunnel") {
+    const tunnelCmd = buildTunnelCommand({
+      remote: opts.remote,
+      sshOpts: opts.sshOpts,
+      localPort: opts.opencodeLocalPort,
+      remotePort: opts.opencodeRemotePort,
+    });
+    if (opts.dryRun) {
+      console.log(`[dry-run] ${tunnelCmd.join(" ")}`);
+      return;
+    }
+
+    writeConfig(opts.configPath, {
+      ...existingConfig,
+      last_remote: opts.remote,
+      last_base: opts.base,
+      last_repo: repoName,
+      updated_at: new Date().toISOString(),
+    });
+
+    await ensureBackgroundTunnel({
+      remote: opts.remote,
+      sshOpts: opts.sshOpts,
+      localPort: opts.opencodeLocalPort,
+      remotePort: opts.opencodeRemotePort,
+    });
+    console.log(
+      `[codebox] Tunnel ready: http://127.0.0.1:${opts.opencodeLocalPort} -> ${opts.remote}:127.0.0.1:${opts.opencodeRemotePort}`,
+    );
     return;
   }
 
