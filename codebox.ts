@@ -140,9 +140,16 @@ function collectEnvVars(args: string[]): Record<string, string> {
   const allow = new Set<string>([...defaults, ...extraNames]);
   const allPrefixes = [...prefixes, ...extraPrefixes];
 
+  const skip = new Set<string>([
+    "OPENCODE_PID",
+    "OPENCODE_SESSION",
+    "CODEX_PID",
+  ]);
+
   const out: Record<string, string> = {};
   for (const [key, val] of Object.entries(process.env)) {
     if (val == null || val === "") continue;
+    if (skip.has(key)) continue;
     if (allow.has(key)) {
       out[key] = val;
       continue;
@@ -561,7 +568,7 @@ function rsyncCmd(
     "--stats",
   ];
   if (verbose) {
-    cmd.push("-v", "--info=progress2");
+    cmd.push("-v", "--progress");
   }
   cmd.push("-e", `ssh ${sshOpts}`);
   for (const ex of excludes) {
