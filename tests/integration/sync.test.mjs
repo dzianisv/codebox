@@ -99,13 +99,30 @@ try {
   );
   assert.match(systemdOut, /bun run install:local/);
   assert.match(systemdOut, /bun run --cwd packages\/opencode install:local/);
-  assert.match(systemdOut, /WorkingDirectory=\$REMOTE_BASE/);
+  assert.match(systemdOut, /WorkingDirectory=\$OPENCODE_DIR/);
   assert.match(
     systemdOut,
-    /ExecStart=.*\$HOME\/\.local\/bin\/opencode.*\$HOME\/\.opencode\/bin\/opencode.*exec "\\\$OPENCODE_BIN" serve --hostname 127\.0\.0\.1 --port 5551/,
+    /ExecStart=.*\$HOME\/\.local\/bin\/opencode.*\$HOME\/\.opencode\/bin\/opencode.*export OPENCODE_DISABLE_CHANNEL_DB="\$\{OPENCODE_DISABLE_CHANNEL_DB:-1\}".*exec "\\\$OPENCODE_BIN" serve --hostname 127\.0\.0\.1 --port 5551/,
   );
   assert.match(systemdOut, /opencode-serve\.service/);
   assert.match(systemdOut, /systemctl --user/);
+
+  const withNohup = runSync([
+    "--opencode-supervisor",
+    "nohup",
+    "--opencode-src",
+    goodOpencodeRepo,
+  ]);
+  assert.equal(
+    withNohup.status,
+    0,
+    `Sync dry-run with nohup failed: ${withNohup.stderr || withNohup.stdout}`,
+  );
+  const nohupOut = `${withNohup.stdout}\n${withNohup.stderr}`;
+  assert.match(
+    nohupOut,
+    /cd "\$OPENCODE_DIR" &&[\s\S]*OPENCODE_DISABLE_CHANNEL_DB="\$\{OPENCODE_DISABLE_CHANNEL_DB:-1\}"[\s\S]*nohup "\$OPENCODE_BIN" serve --hostname 127\.0\.0\.1 --port "\$OPENCODE_PORT"/,
+  );
 
   const withoutAuth = runSync(["--no-opencode-auth", "--opencode-src", goodOpencodeRepo]);
   assert.equal(

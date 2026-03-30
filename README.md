@@ -71,11 +71,12 @@ codebox tunnel --all
   - when the preferred local port is already occupied, `codebox` automatically picks the next free localhost port and remembers it for that remote target
 - The remote OpenCode checkout is anchored to `https://github.com/dzianisv/opencode.git` by default. If you sync a local `--opencode-src`, it must also point at that fork unless you intentionally override `--opencode-repo-url`.
 - When the fork checkout exposes an `install:local` hook, `codebox` installs that build on the VM and prefers `~/.local/bin/opencode` before any downloaded `~/.opencode/bin/opencode` channel binary.
+- Remote OpenCode startup defaults `OPENCODE_DISABLE_CHANNEL_DB=1` unless you override it, so switching between downloaded and repo-local builds keeps using the shared `opencode.db` state.
 - When OpenCode config sync is enabled, `codebox` also syncs `~/.local/share/opencode/auth.json` so GitHub Copilot-backed remote sessions keep working.
 - Remote OpenCode supervision is configurable with `--opencode-supervisor auto|nohup|systemd`:
   - `auto` prefers `systemd --user` and falls back to `nohup`
-  - `systemd` installs/refreshes `opencode-serve.service`, runs it from the remote workspace root, stops it before reinstalling `opencode`, and tries to enable user lingering
-  - `nohup` keeps the old one-shot background behavior
+  - `systemd` installs/refreshes `opencode-serve.service`, runs it from the remote OpenCode checkout, stops it before reinstalling `opencode`, and tries to enable user lingering
+  - `nohup` keeps the one-shot background behavior, but still starts from the remote OpenCode checkout so repo-built frontend assets are served
 
 Install Jetify `devbox` CLI into your Bun local bin path:
 

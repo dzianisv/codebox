@@ -1716,8 +1716,15 @@ start_opencode_nohup() {
     return 0
   fi
   mkdir -p "$HOME/.cache/codebox"
-  nohup "$OPENCODE_BIN" serve --hostname 127.0.0.1 --port "$OPENCODE_PORT" \
-    > "$HOME/.cache/codebox/opencode-serve.log" 2>&1 &
+  if ! (
+    cd "$OPENCODE_DIR" &&
+    OPENCODE_DISABLE_CHANNEL_DB="\${OPENCODE_DISABLE_CHANNEL_DB:-1}" \
+    nohup "$OPENCODE_BIN" serve --hostname 127.0.0.1 --port "$OPENCODE_PORT" \
+      > "$HOME/.cache/codebox/opencode-serve.log" 2>&1 &
+  ); then
+    echo "Warning: failed to start OpenCode serve from $OPENCODE_DIR via nohup."
+    return 1
+  fi
   echo "Info: started OpenCode serve via nohup on 127.0.0.1:$OPENCODE_PORT (log: ~/.cache/codebox/opencode-serve.log)"
 }
 
@@ -1731,8 +1738,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$REMOTE_BASE
-ExecStart=/bin/bash -lc 'if [ -f "$HOME/.config/codebox/env.sh" ]; then . "$HOME/.config/codebox/env.sh"; fi; if [ -x "$HOME/.local/bin/opencode" ]; then OPENCODE_BIN="$HOME/.local/bin/opencode"; elif [ -x "$HOME/.opencode/bin/opencode" ]; then OPENCODE_BIN="$HOME/.opencode/bin/opencode"; else OPENCODE_BIN="$(command -v opencode)"; fi; exec "\\$OPENCODE_BIN" serve --hostname 127.0.0.1 --port ${opts.opencodeRemotePort}'
+WorkingDirectory=$OPENCODE_DIR
+ExecStart=/bin/bash -lc 'if [ -f "$HOME/.config/codebox/env.sh" ]; then . "$HOME/.config/codebox/env.sh"; fi; if [ -x "$HOME/.local/bin/opencode" ]; then OPENCODE_BIN="$HOME/.local/bin/opencode"; elif [ -x "$HOME/.opencode/bin/opencode" ]; then OPENCODE_BIN="$HOME/.opencode/bin/opencode"; else OPENCODE_BIN="$(command -v opencode)"; fi; export OPENCODE_DISABLE_CHANNEL_DB="\${OPENCODE_DISABLE_CHANNEL_DB:-1}"; exec "\\$OPENCODE_BIN" serve --hostname 127.0.0.1 --port ${opts.opencodeRemotePort}'
 Restart=always
 RestartSec=2
 StandardOutput=append:%h/.cache/codebox/opencode-serve.log
