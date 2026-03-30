@@ -19,6 +19,8 @@ npm install -g .
 
 ```sh
 codebox --remote azureuser@dev-1 --base '$HOME/workspace'
+codebox --remote azureuser@dev-1 --exclude '.android-sdk-fixed' --exclude '.gradle-home' --opencode-supervisor systemd
+codebox --remote azureuser@dev-1 --opencode-repo-url https://github.com/dzianisv/opencode.git
 ```
 
 Quick SSH access to the synced repo on remote:
@@ -40,6 +42,9 @@ Dedicated tunnel command (starts/reuses background tunnel and returns):
 ```sh
 codebox tunnel
 codebox tunnel --opencode-local-port 4097 --opencode-remote-port 4097
+codebox tunnel --repo termux-app
+codebox tunnel --list
+codebox tunnel --all
 ```
 
 ## Notes
@@ -49,15 +54,28 @@ codebox tunnel --opencode-local-port 4097 --opencode-remote-port 4097
 - `codebox ssh` auto-enters `$BASE/<current-folder>` on remote when that directory exists.
 - In `codebox ssh` mode, unknown flags are passed through to `ssh` (for example `-L`, `-R`, `-D`, `-N`, `-p`, `-i`).
 - `codebox tunnel` is the simplest way to pin the OpenCode tunnel in the background.
+- `codebox tunnel --repo <name>` lets you target a remembered repo from any working directory instead of implicitly using the current folder name.
+- `codebox` now remembers synced/tunneled remote targets in `~/.config/codebox.json`, including VM hostname, repo, SSH opts, and the localhost OpenCode port mapping.
+- `codebox tunnel --list` shows remembered targets with VM name, repo, localhost URL, remote port, and current status.
+- `codebox tunnel --all` reconciles background OpenCode tunnels for every remembered target instead of only the most recent one.
 - Syncs `.git` by default so the remote is a real git repo.
 - Excludes `codex-rs/target*`, `node_modules`, `dist`, `.venv` by default.
-- Syncs env vars into remote `~/.bashrc` (defaults include `GITHUB_TOKEN`, `OPENAI_*`, `AZURE_OPENAI_*`, `OPENCODE_*`, `CODEX_*`, and any `*_TOKEN`). Use `--no-env`, `--env`, `--env-prefix` to control.
+- Supports repeatable `--exclude` flags for repo-local heavyweight directories that should stay local.
+- Syncs env vars into a managed remote shell/OpenCode env file and wires remote `~/.bashrc` to source it (defaults include `GITHUB_TOKEN`, `OPENAI_*`, `AZURE_OPENAI_*`, `OPENCODE_*`, `CODEX_*`, and any `*_TOKEN`). Use `--no-env`, `--env`, `--env-prefix` to control.
 - Prompts before syncing secrets or `~/.ssh` unless `--yes` is provided.
 - Use `-v/--verbose` for rsync progress output.
 - Sync mode now ensures OpenCode is running on remote (`127.0.0.1:5551`) and starts a background local SSH tunnel by default:
   - `localhost:5551 -> remote:127.0.0.1:5551`
   - disable with `--no-opencode-tunnel`
   - override ports with `--opencode-local-port <n>` and `--opencode-remote-port <n>`
+  - when the preferred local port is already occupied, `codebox` automatically picks the next free localhost port and remembers it for that remote target
+- The remote OpenCode checkout is anchored to `https://github.com/dzianisv/opencode.git` by default. If you sync a local `--opencode-src`, it must also point at that fork unless you intentionally override `--opencode-repo-url`.
+- When the fork checkout exposes an `install:local` hook, `codebox` installs that build on the VM and prefers `~/.local/bin/opencode` before any downloaded `~/.opencode/bin/opencode` channel binary.
+- When OpenCode config sync is enabled, `codebox` also syncs `~/.local/share/opencode/auth.json` so GitHub Copilot-backed remote sessions keep working.
+- Remote OpenCode supervision is configurable with `--opencode-supervisor auto|nohup|systemd`:
+  - `auto` prefers `systemd --user` and falls back to `nohup`
+  - `systemd` installs/refreshes `opencode-serve.service`, runs it from the remote workspace root, stops it before reinstalling `opencode`, and tries to enable user lingering
+  - `nohup` keeps the old one-shot background behavior
 
 Install Jetify `devbox` CLI into your Bun local bin path:
 
