@@ -82,6 +82,8 @@ try {
       `codebox --help failed: ${helpResult.stderr || helpResult.stdout}`,
     );
     assert.match(helpResult.stdout + helpResult.stderr, /Usage:/);
+    assert.match(helpResult.stdout + helpResult.stderr, /--opencode-ref <branch\|sha>/);
+    assert.match(helpResult.stdout + helpResult.stderr, /default: "dev"/);
   } else if (process.platform !== "win32") {
     const contents = readFileSync(codeboxBin, "utf8");
     const firstLine = contents.split("\n")[0] ?? "";

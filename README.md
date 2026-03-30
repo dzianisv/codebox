@@ -20,7 +20,8 @@ npm install -g .
 ```sh
 codebox --remote azureuser@dev-1 --base '$HOME/workspace'
 codebox --remote azureuser@dev-1 --exclude '.android-sdk-fixed' --exclude '.gradle-home' --opencode-supervisor systemd
-codebox --remote azureuser@dev-1 --opencode-repo-url https://github.com/dzianisv/opencode.git
+codebox --remote azureuser@dev-1 --opencode-repo-url https://github.com/dzianisv/opencode.git --opencode-ref dev
+codebox --remote azureuser@dev-1 --opencode-src ~/workspace/opencode
 ```
 
 Quick SSH access to the synced repo on remote:
@@ -69,7 +70,9 @@ codebox tunnel --all
   - disable with `--no-opencode-tunnel`
   - override ports with `--opencode-local-port <n>` and `--opencode-remote-port <n>`
   - when the preferred local port is already occupied, `codebox` automatically picks the next free localhost port and remembers it for that remote target
-- The remote OpenCode checkout is anchored to `https://github.com/dzianisv/opencode.git` by default. If you sync a local `--opencode-src`, it must also point at that fork unless you intentionally override `--opencode-repo-url`.
+- The default OpenCode deployment source is the managed remote checkout of `https://github.com/dzianisv/opencode.git` at ref `dev`.
+- Use `--opencode-ref <branch|sha>` to deploy another branch or commit from that fork.
+- Use `--opencode-src <path>` only when you intentionally want a local checkout to override the managed remote checkout. If you do, its `origin` must still point at the same fork unless you intentionally override `--opencode-repo-url`.
 - When the fork checkout exposes an `install:local` hook, `codebox` installs that build on the VM and prefers `~/.local/bin/opencode` before any downloaded `~/.opencode/bin/opencode` channel binary.
 - Remote OpenCode startup defaults `OPENCODE_DISABLE_CHANNEL_DB=1` unless you override it, so switching between downloaded and repo-local builds keeps using the shared `opencode.db` state.
 - When OpenCode config sync is enabled, `codebox` also syncs `~/.local/share/opencode/auth.json` so GitHub Copilot-backed remote sessions keep working.

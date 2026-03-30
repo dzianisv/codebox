@@ -75,6 +75,23 @@ function runSync(args) {
 }
 
 try {
+  const defaultManagedOpencode = runSync([]);
+  assert.equal(
+    defaultManagedOpencode.status,
+    0,
+    `Default sync dry-run failed: ${defaultManagedOpencode.stderr || defaultManagedOpencode.stdout}`,
+  );
+  const defaultOut = `${defaultManagedOpencode.stdout}\n${defaultManagedOpencode.stderr}`;
+  assert.match(defaultOut, /OPENCODE_REPO_URL=\$'https:\/\/github\.com\/dzianisv\/opencode\.git'/);
+  assert.match(defaultOut, /OPENCODE_REF=\$'dev'/);
+  assert.match(defaultOut, /OPENCODE_SYNC_LOCAL_SOURCE=\$'0'/);
+  assert.match(defaultOut, /git -C "\$OPENCODE_DIR" fetch --force --tags --prune origin/);
+  assert.match(
+    defaultOut,
+    /git -C "\$OPENCODE_DIR" checkout -B "\$OPENCODE_REF" "refs\/remotes\/origin\/\$OPENCODE_REF"/,
+  );
+  assert.doesNotMatch(defaultOut, /sync opencode repo/);
+
   const withSystemd = runSync([
     "--opencode-supervisor",
     "systemd",
@@ -90,8 +107,11 @@ try {
   assert.match(systemdOut, /sync ~\/\.config\/opencode/);
   assert.match(systemdOut, /sync ~\/\.local\/share\/opencode\/auth\.json/);
   assert.match(systemdOut, /OPENCODE_REPO_URL=\$'https:\/\/github\.com\/dzianisv\/opencode\.git'/);
+  assert.match(systemdOut, /OPENCODE_REF=\$'dev'/);
+  assert.match(systemdOut, /OPENCODE_SYNC_LOCAL_SOURCE=\$'1'/);
   assert.match(systemdOut, /OPENCODE_SUPERVISOR=\$'systemd'/);
   assert.match(systemdOut, /git clone "\$OPENCODE_REPO_URL" "\$scratch_dir\/repo"/);
+  assert.match(systemdOut, /preserving synced local OpenCode source/);
   assert.match(systemdOut, /systemd_user_cmd stop opencode-serve\.service/);
   assert.match(
     systemdOut,

@@ -5,6 +5,7 @@ import os from "node:os";
 
 type OpencodeSupervisor = "auto" | "nohup" | "systemd";
 const DEFAULT_OPENCODE_REPO_URL = "https://github.com/dzianisv/opencode.git";
+const DEFAULT_OPENCODE_REF = "dev";
 
 type Options = {
   remote: string;
@@ -12,6 +13,7 @@ type Options = {
   base: string;
   opencodeSrc?: string;
   opencodeRepoUrl: string;
+  opencodeRef: string;
   repoExcludes: string[];
   opencodeTunnel: boolean;
   opencodeLocalPort: number;
@@ -70,8 +72,9 @@ Options:
   --ssh-opts <string>         SSH options (default: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes")
   --base <path>               Remote base dir (default: "$HOME/workspace")
   --repo <name>               Tunnel mode only: remembered repo to target instead of current working directory
-  --opencode-src <path>       Local opencode repo path (default: ~/workspace/opencode if exists)
+  --opencode-src <path>       Optional local opencode repo path to sync instead of managed remote checkout
   --opencode-repo-url <url>   OpenCode git remote to anchor on the target (default: "${DEFAULT_OPENCODE_REPO_URL}")
+  --opencode-ref <branch|sha> OpenCode branch or commit for the managed remote checkout (default: "${DEFAULT_OPENCODE_REF}")
   --exclude <pattern>         Extra repo rsync exclude pattern (repeatable)
   --no-opencode-tunnel        Skip auto-starting localhost SSH tunnel to remote OpenCode
   --opencode-local-port <n>   Local forwarded port (default: 5551)
@@ -98,6 +101,7 @@ SSH mode:
 
 Example:
   ./codebox.ts --remote azureuser@dev-1 --base '$HOME/workspace'
+  ./codebox.ts --remote azureuser@dev-1 --opencode-ref dev
   ./codebox.ts ssh azureuser@dev-1
   ./codebox.ts ssh -L 4097:127.0.0.1:4097 -N
   ./codebox.ts tunnel
@@ -128,6 +132,18 @@ function argValues(args: string[], name: string): string[] {
 
 function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
+}
+
+function parseNonEmptyOption(
+  value: string | undefined,
+  name: string,
+  fallback: string,
+): string {
+  const resolved = (value ?? fallback).trim();
+  if (!resolved) {
+    throw new Error(`${name} cannot be empty.`);
+  }
+  return resolved;
 }
 
 function expandHome(p: string): string {
@@ -498,6 +514,7 @@ function findPositionalRemote(args: string[]): string | undefined {
     "--repo",
     "--opencode-src",
     "--opencode-repo-url",
+    "--opencode-ref",
     "--opencode-local-port",
     "--opencode-remote-port",
     "--opencode-supervisor",
@@ -537,6 +554,7 @@ function parseSshModeArgs(rawArgs: string[]): ParsedSshModeArgs {
     "--repo",
     "--opencode-src",
     "--opencode-repo-url",
+    "--opencode-ref",
     "--opencode-local-port",
     "--opencode-remote-port",
     "--opencode-supervisor",
@@ -1161,13 +1179,16 @@ async function main() {
   validateRemote(remote);
 
   const opencodeSrcArg = argValue(args, "--opencode-src") ?? process.env.OPENCODE_SRC;
-  const opencodeSrcDefault = resolve(expandHome("~/workspace/opencode"));
-  const opencodeSrc =
-    opencodeSrcArg ?? (existsSync(opencodeSrcDefault) ? opencodeSrcDefault : undefined);
+  const opencodeSrc = opencodeSrcArg ? resolve(expandHome(opencodeSrcArg)) : undefined;
   const opencodeRepoUrl =
     argValue(args, "--opencode-repo-url") ??
     process.env.OPENCODE_REPO_URL ??
     DEFAULT_OPENCODE_REPO_URL;
+  const opencodeRef = parseNonEmptyOption(
+    argValue(args, "--opencode-ref") ?? process.env.OPENCODE_REF,
+    "--opencode-ref",
+    DEFAULT_OPENCODE_REF,
+  );
   const opencodeLocalPortRaw =
     argValue(args, "--opencode-local-port") ?? process.env.OPENCODE_LOCAL_PORT;
   const opencodeLocalPortExplicit = opencodeLocalPortRaw != null;
@@ -1214,6 +1235,7 @@ async function main() {
     base,
     opencodeSrc,
     opencodeRepoUrl,
+    opencodeRef,
     repoExcludes: argValues(args, "--exclude"),
     opencodeTunnel: !hasFlag(args, "--no-opencode-tunnel"),
     opencodeLocalPort: resolvedOpencodeLocalPort,
@@ -1555,6 +1577,8 @@ REPO_NAME=${bashQuote(repoName)}
 REPO_DIR="$REMOTE_BASE/$REPO_NAME"
 OPENCODE_DIR="$REMOTE_BASE/opencode"
 OPENCODE_REPO_URL=${bashQuote(opts.opencodeRepoUrl)}
+OPENCODE_REF=${bashQuote(opts.opencodeRef)}
+OPENCODE_SYNC_LOCAL_SOURCE=${bashQuote(syncLocalOpencodeRepo ? "1" : "0")}
 OPENCODE_PORT=${bashQuote(String(opts.opencodeRemotePort))}
 OPENCODE_SUPERVISOR=${bashQuote(opts.opencodeSupervisor)}
 
@@ -1627,19 +1651,47 @@ ensure_opencode_checkout() {
     else
       git -C "$OPENCODE_DIR" remote add origin "$OPENCODE_REPO_URL"
     fi
+    echo "Info: ensured OpenCode checkout at $OPENCODE_DIR from $OPENCODE_REPO_URL"
+  else
+    local scratch_dir
+    scratch_dir="$(mktemp -d "$REMOTE_BASE/.codebox-opencode.XXXXXX")"
+    git clone "$OPENCODE_REPO_URL" "$scratch_dir/repo"
+    if [ -d "$OPENCODE_DIR" ] && [ -n "$(ls -A "$OPENCODE_DIR" 2>/dev/null)" ]; then
+      rsync -a --delete --exclude .git "$OPENCODE_DIR"/ "$scratch_dir/repo"/
+    fi
+    rm -rf "$OPENCODE_DIR"
+    mv "$scratch_dir/repo" "$OPENCODE_DIR"
+    rmdir "$scratch_dir" 2>/dev/null || true
+    echo "Info: ensured OpenCode checkout at $OPENCODE_DIR from $OPENCODE_REPO_URL"
+  fi
+
+  if [ "$OPENCODE_SYNC_LOCAL_SOURCE" = "1" ]; then
+    echo "Info: preserving synced local OpenCode source at $OPENCODE_DIR (requested ref: $OPENCODE_REF)"
     return 0
   fi
 
-  local scratch_dir
-  scratch_dir="$(mktemp -d "$REMOTE_BASE/.codebox-opencode.XXXXXX")"
-  git clone "$OPENCODE_REPO_URL" "$scratch_dir/repo"
-  if [ -d "$OPENCODE_DIR" ] && [ -n "$(ls -A "$OPENCODE_DIR" 2>/dev/null)" ]; then
-    rsync -a --delete --exclude .git "$OPENCODE_DIR"/ "$scratch_dir/repo"/
+  git -C "$OPENCODE_DIR" fetch --force --tags --prune origin
+
+  if git -C "$OPENCODE_DIR" show-ref --verify --quiet "refs/remotes/origin/$OPENCODE_REF"; then
+    git -C "$OPENCODE_DIR" checkout -B "$OPENCODE_REF" "refs/remotes/origin/$OPENCODE_REF"
+    echo "Info: checked out OpenCode ref origin/$OPENCODE_REF"
+    return 0
   fi
-  rm -rf "$OPENCODE_DIR"
-  mv "$scratch_dir/repo" "$OPENCODE_DIR"
-  rmdir "$scratch_dir" 2>/dev/null || true
-  echo "Info: ensured OpenCode checkout at $OPENCODE_DIR from $OPENCODE_REPO_URL"
+
+  if git -C "$OPENCODE_DIR" rev-parse --verify --quiet "$OPENCODE_REF^{commit}" >/dev/null; then
+    git -C "$OPENCODE_DIR" checkout --detach "$OPENCODE_REF"
+    echo "Info: checked out OpenCode ref $OPENCODE_REF"
+    return 0
+  fi
+
+  if git -C "$OPENCODE_DIR" fetch --force origin "$OPENCODE_REF" >/dev/null 2>&1; then
+    git -C "$OPENCODE_DIR" checkout --detach FETCH_HEAD
+    echo "Info: checked out OpenCode fetched ref $OPENCODE_REF"
+    return 0
+  fi
+
+  echo "Error: failed to resolve OpenCode ref '$OPENCODE_REF' from $OPENCODE_REPO_URL." >&2
+  return 1
 }
 
 stop_opencode_runtime() {
