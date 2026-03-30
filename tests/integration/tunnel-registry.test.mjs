@@ -57,6 +57,7 @@ async function occupyPort() {
 try {
   const rememberedPort = await getFreePort();
   const secondRememberedPort = await getFreePort();
+  const thirdRememberedPort = await getFreePort();
   const configPath = path.join(tempRoot, "codebox.json");
   writeFileSync(
     configPath,
@@ -90,6 +91,18 @@ try {
             lastSyncedAt: "2026-03-28T23:00:00.000Z",
             updatedAt: "2026-03-28T23:00:00.000Z",
           },
+          "older-user@older-host::$HOME/workspace::demo-repo": {
+            remote: "older-user@older-host",
+            remoteHost: "vm-gamma",
+            sshOpts: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes",
+            base: "$HOME/workspace",
+            repo: "demo-repo",
+            remoteRepo: "$HOME/workspace/demo-repo",
+            opencodeLocalPort: thirdRememberedPort,
+            opencodeRemotePort: 5551,
+            lastSyncedAt: "2026-03-28T22:00:00.000Z",
+            updatedAt: "2026-03-28T22:00:00.000Z",
+          },
         },
       },
       null,
@@ -109,6 +122,7 @@ try {
   assert.match(listedOut, new RegExp(`local=http://127\\.0\\.0\\.1:${rememberedPort}`));
   assert.match(listedOut, /vm=vm-beta/);
   assert.match(listedOut, /repo=demo-repo/);
+  assert.match(listedOut, /vm=vm-gamma/);
 
   const allDryRun = runCodebox(["tunnel", "--all", "--config", configPath, "--dry-run"]);
   assert.equal(
@@ -155,6 +169,10 @@ try {
   assert.match(
     selectedRepoOut,
     new RegExp(`-L ${secondRememberedPort}:127\\.0\\.0\\.1:5551 other-user@other-host`),
+  );
+  assert.doesNotMatch(
+    selectedRepoOut,
+    new RegExp(`-L ${thirdRememberedPort}:127\\.0\\.0\\.1:5551 older-user@older-host`),
   );
 
   const occupied = await occupyPort();

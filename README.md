@@ -18,8 +18,8 @@ npm install -g .
 ## Usage
 
 ```sh
-codebox --remote azureuser@dev-1 --base '$HOME/workspace'
-codebox --remote azureuser@dev-1 --exclude '.android-sdk-fixed' --exclude '.gradle-home' --opencode-supervisor systemd
+codebox --remote azureuser@dev-1
+codebox --remote azureuser@dev-1 --exclude '.android-sdk-fixed' --exclude '.gradle-home'
 codebox --remote azureuser@dev-1 --opencode-repo-url https://github.com/dzianisv/opencode.git --opencode-ref dev
 codebox --remote azureuser@dev-1 --opencode-src ~/workspace/opencode
 ```
@@ -32,11 +32,13 @@ codebox ssh azureuser@dev-1 -- git status -sb
 codebox ssh -L 4097:127.0.0.1:4097 -N
 ```
 
-If you don't pass `--remote`, the last used remote is loaded from:
+If you don't pass `--remote`, remembered targets are loaded from:
 
 ```
 ~/.config/codebox.json
 ```
+
+If the current repo already has remembered VM targets, `codebox` picks from those first. In a TTY it shows a numbered chooser; in non-interactive mode it falls back to the most recent remembered target.
 
 Dedicated tunnel command (starts/reuses background tunnel and returns):
 
@@ -76,9 +78,9 @@ codebox tunnel --all
 - When the fork checkout exposes an `install:local` hook, `codebox` installs that build on the VM and prefers `~/.local/bin/opencode` before any downloaded `~/.opencode/bin/opencode` channel binary.
 - Remote OpenCode startup defaults `OPENCODE_DISABLE_CHANNEL_DB=1` unless you override it, so switching between downloaded and repo-local builds keeps using the shared `opencode.db` state.
 - When OpenCode config sync is enabled, `codebox` also syncs `~/.local/share/opencode/auth.json` so GitHub Copilot-backed remote sessions keep working.
-- Remote OpenCode supervision is configurable with `--opencode-supervisor auto|nohup|systemd`:
-  - `auto` prefers `systemd --user` and falls back to `nohup`
+- Remote OpenCode supervision defaults to `systemd`; use `--opencode-supervisor auto|nohup|systemd` to override:
   - `systemd` installs/refreshes `opencode-serve.service`, runs it from the remote OpenCode checkout, stops it before reinstalling `opencode`, and tries to enable user lingering
+  - `auto` prefers `systemd --user` and falls back to `nohup`
   - `nohup` keeps the one-shot background behavior, but still starts from the remote OpenCode checkout so repo-built frontend assets are served
 
 Install Jetify `devbox` CLI into your Bun local bin path:

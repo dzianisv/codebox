@@ -4,8 +4,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 
 type OpencodeSupervisor = "auto" | "nohup" | "systemd";
+const DEFAULT_BASE = "$HOME/workspace";
 const DEFAULT_OPENCODE_REPO_URL = "https://github.com/dzianisv/opencode.git";
 const DEFAULT_OPENCODE_REF = "dev";
+const DEFAULT_OPENCODE_SUPERVISOR: OpencodeSupervisor = "systemd";
 
 type Options = {
   remote: string;
@@ -63,14 +65,14 @@ type KnownTargetSelector = {
 
 function usage(): string {
   return `Usage:
-  ./codebox.ts --remote <user@host> [options]
+  ./codebox.ts [--remote <user@host>] [options]
   ./codebox.ts ssh [<user@host>] [options] [ssh-options] [-- <remote command...>]
   ./codebox.ts tunnel [<user@host>] [options]
 
 Options:
-  --remote <user@host>        SSH target (required for sync mode)
+  --remote <user@host>        SSH target (default: recent remembered target)
   --ssh-opts <string>         SSH options (default: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes")
-  --base <path>               Remote base dir (default: "$HOME/workspace")
+  --base <path>               Remote base dir (default: "${DEFAULT_BASE}")
   --repo <name>               Tunnel mode only: remembered repo to target instead of current working directory
   --opencode-src <path>       Optional local opencode repo path to sync instead of managed remote checkout
   --opencode-repo-url <url>   OpenCode git remote to anchor on the target (default: "${DEFAULT_OPENCODE_REPO_URL}")
@@ -79,7 +81,7 @@ Options:
   --no-opencode-tunnel        Skip auto-starting localhost SSH tunnel to remote OpenCode
   --opencode-local-port <n>   Local forwarded port (default: 5551)
   --opencode-remote-port <n>  Remote OpenCode port (default: 5551)
-  --opencode-supervisor <m>   Remote OpenCode supervisor: auto|nohup|systemd (default: auto)
+  --opencode-supervisor <m>   Remote OpenCode supervisor: auto|nohup|systemd (default: ${DEFAULT_OPENCODE_SUPERVISOR})
   --list                      Tunnel mode only: show remembered tunnel targets
   --all                       Tunnel mode only: start/reconcile all remembered tunnel targets
   --no-git                    Do NOT sync .git (default: sync .git)
@@ -100,9 +102,10 @@ SSH mode:
   Unrecognized ssh-mode flags are passed through to ssh (for example: -L, -R, -D, -N, -p, -i).
 
 Example:
-  ./codebox.ts --remote azureuser@dev-1 --base '$HOME/workspace'
+  ./codebox.ts --remote azureuser@dev-1
   ./codebox.ts --remote azureuser@dev-1 --opencode-ref dev
   ./codebox.ts ssh azureuser@dev-1
+  ./codebox.ts ssh
   ./codebox.ts ssh -L 4097:127.0.0.1:4097 -N
   ./codebox.ts tunnel
   ./codebox.ts tunnel azureuser@dev-1 --opencode-local-port 4097 --opencode-remote-port 4097
@@ -256,10 +259,111 @@ function selectKnownTargets(
       return true;
     })
     .sort((left, right) => {
-      const a = left.updatedAt ?? left.lastTunneledAt ?? left.lastSyncedAt ?? "";
-      const b = right.updatedAt ?? right.lastTunneledAt ?? right.lastSyncedAt ?? "";
+      const a = knownTargetActivityStamp(left);
+      const b = knownTargetActivityStamp(right);
       return b.localeCompare(a);
     });
+}
+
+function knownTargetActivityStamp(target: KnownTarget): string {
+  return target.updatedAt ?? target.lastTunneledAt ?? target.lastSyncedAt ?? "";
+}
+
+function collapseKnownTargetsByRemote(targets: KnownTarget[]): KnownTarget[] {
+  const seen = new Set<string>();
+  const collapsed: KnownTarget[] = [];
+  for (const target of targets) {
+    if (seen.has(target.remote)) continue;
+    seen.add(target.remote);
+    collapsed.push(target);
+  }
+  return collapsed;
+}
+
+function formatKnownTargetChoice(target: KnownTarget): string {
+  const vmName = target.remoteHost ?? target.remote;
+  const parts = [
+    `vm=${vmName}`,
+    `remote=${target.remote}`,
+    `repo=${target.repo}`,
+    `base=${target.base}`,
+  ];
+  const lastUsed = knownTargetActivityStamp(target);
+  if (lastUsed) {
+    parts.push(`last_used=${lastUsed}`);
+  }
+  return parts.join(" ");
+}
+
+async function promptLine(prompt: string): Promise<string> {
+  process.stderr.write(prompt);
+  process.stdin.setEncoding("utf8");
+  return await new Promise<string>((resolve) => {
+    process.stdin.once("data", (data) => resolve(String(data)));
+  });
+}
+
+async function chooseKnownTarget(
+  promptMessage: string,
+  targets: KnownTarget[],
+): Promise<KnownTarget | undefined> {
+  if (targets.length === 0) return undefined;
+  if (targets.length === 1 || !process.stdin.isTTY) {
+    return targets[0];
+  }
+
+  process.stderr.write(`${promptMessage}\n`);
+  targets.forEach((target, index) => {
+    process.stderr.write(`  ${index + 1}. ${formatKnownTargetChoice(target)}\n`);
+  });
+
+  while (true) {
+    const input = (await promptLine(`Select target [1-${targets.length}] (default 1): `)).trim();
+    if (input === "") return targets[0];
+    if (/^\d+$/.test(input)) {
+      const selected = Number.parseInt(input, 10);
+      if (selected >= 1 && selected <= targets.length) {
+        return targets[selected - 1];
+      }
+    }
+    process.stderr.write(`Invalid selection: ${input || "(empty)"}\n`);
+  }
+}
+
+async function resolveRememberedTarget(params: {
+  config: CodeboxConfig;
+  repo: string;
+  remote?: string;
+  base?: string;
+  requireRepoMatch?: boolean;
+}): Promise<KnownTarget | undefined> {
+  const repoTargets = selectKnownTargets(params.config, {
+    repo: params.repo,
+    remote: params.remote,
+    base: params.base,
+  });
+
+  if (params.requireRepoMatch) {
+    return await chooseKnownTarget(
+      `Select remembered target for repo "${params.repo}":`,
+      repoTargets,
+    );
+  }
+
+  if (params.remote) {
+    return repoTargets[0];
+  }
+
+  const repoMatch = await chooseKnownTarget(
+    `Select recent target for repo "${params.repo}":`,
+    repoTargets,
+  );
+  if (repoMatch) return repoMatch;
+
+  const recentRemoteTargets = collapseKnownTargetsByRemote(
+    selectKnownTargets(params.config, { base: params.base }),
+  );
+  return await chooseKnownTarget("Select recent remote target:", recentRemoteTargets);
 }
 
 function canShareTunnel(a: KnownTarget, b: Pick<KnownTarget, "remote" | "opencodeRemotePort">): boolean {
@@ -444,8 +548,11 @@ function parsePort(raw: string | undefined, name: string, fallback: number): num
 }
 
 function parseOpencodeSupervisor(raw: string | undefined): OpencodeSupervisor {
-  const text = (raw ?? "auto").trim().toLowerCase();
-  if (text === "" || text === "auto") return "auto";
+  const text = (raw ?? DEFAULT_OPENCODE_SUPERVISOR).trim().toLowerCase();
+  if (text === "" || text === DEFAULT_OPENCODE_SUPERVISOR) {
+    return DEFAULT_OPENCODE_SUPERVISOR;
+  }
+  if (text === "auto") return "auto";
   if (text === "nohup") return "nohup";
   if (text === "systemd") return "systemd";
   throw new Error(
@@ -642,11 +749,7 @@ async function promptYes(message: string, assumeYes: boolean): Promise<void> {
   if (!process.stdin.isTTY) {
     throw new Error(`${message} Use --yes to proceed or disable the option.`);
   }
-  process.stderr.write(`${message} Type 'yes' to continue: `);
-  process.stdin.setEncoding("utf8");
-  const input = await new Promise<string>((resolve) => {
-    process.stdin.once("data", (data) => resolve(String(data)));
-  });
+  const input = await promptLine(`${message} Type 'yes' to continue: `);
   if (input.trim().toLowerCase() !== "yes") {
     throw new Error("Aborted.");
   }
@@ -938,8 +1041,8 @@ async function listKnownTargets(config: CodeboxConfig): Promise<string[]> {
   const targets = getKnownTargetEntries(config)
     .map(([, target]) => target)
     .sort((left, right) => {
-      const a = left.updatedAt ?? left.lastTunneledAt ?? left.lastSyncedAt ?? "";
-      const b = right.updatedAt ?? right.lastTunneledAt ?? right.lastSyncedAt ?? "";
+      const a = knownTargetActivityStamp(left);
+      const b = knownTargetActivityStamp(right);
       return b.localeCompare(a);
     });
   const lines: string[] = [];
@@ -1025,28 +1128,24 @@ async function main() {
     throw new Error("Cannot combine --list and --all in tunnel mode.");
   }
 
+  const repoRoot = resolve(process.cwd());
+  const repoName = requestedRepo ?? basename(repoRoot);
   const requestedBase = argValue(args, "--base") ?? process.env.BASE;
   const requestedRemoteHint =
     argValue(args, "--remote") ?? positionalRemote ?? process.env.REMOTE;
   const rememberedTarget =
-    requestedRepo && !tunnelListMode && !tunnelAllMode
-      ? (() => {
-          const matches = selectKnownTargets(existingConfig, {
-            repo: requestedRepo,
-            remote: requestedRemoteHint,
-            base: requestedBase,
-          });
-          if (matches.length === 0) {
-            throw new Error(`No remembered target found for repo "${requestedRepo}".`);
-          }
-          if (matches.length > 1) {
-            throw new Error(
-              `Multiple remembered targets found for repo "${requestedRepo}". Pass --remote to disambiguate.`,
-            );
-          }
-          return matches[0];
-        })()
+    !tunnelListMode && !tunnelAllMode
+      ? await resolveRememberedTarget({
+          config: existingConfig,
+          repo: repoName,
+          remote: requestedRemoteHint,
+          base: requestedBase,
+          requireRepoMatch: Boolean(requestedRepo),
+        })
       : undefined;
+  if (requestedRepo && !tunnelListMode && !tunnelAllMode && !rememberedTarget) {
+    throw new Error(`No remembered target found for repo "${requestedRepo}".`);
+  }
 
   const sshOpts =
     argValue(args, "--ssh-opts") ??
@@ -1060,11 +1159,7 @@ async function main() {
   const base =
     requestedBase ??
     rememberedTarget?.base ??
-    process.env.BASE ??
-    (typeof existingConfig.last_base === "string" ? existingConfig.last_base : undefined) ??
-    "$HOME/workspace";
-  const repoRoot = resolve(process.cwd());
-  const repoName = rememberedTarget?.repo ?? basename(repoRoot);
+    DEFAULT_BASE;
   const remoteRepo = rememberedTarget?.remoteRepo ?? `${base}/${repoName}`;
 
   if (mode === "sync") {
@@ -1166,9 +1261,7 @@ async function main() {
   }
 
   const remote =
-    argValue(args, "--remote") ??
-    positionalRemote ??
-    process.env.REMOTE ??
+    requestedRemoteHint ??
     rememberedTarget?.remote ??
     (typeof existingConfig.last_remote === "string" ? existingConfig.last_remote : undefined);
   if (!remote) {

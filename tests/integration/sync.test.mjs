@@ -85,11 +85,13 @@ try {
   assert.match(defaultOut, /OPENCODE_REPO_URL=\$'https:\/\/github\.com\/dzianisv\/opencode\.git'/);
   assert.match(defaultOut, /OPENCODE_REF=\$'dev'/);
   assert.match(defaultOut, /OPENCODE_SYNC_LOCAL_SOURCE=\$'0'/);
+  assert.match(defaultOut, /OPENCODE_SUPERVISOR=\$'systemd'/);
   assert.match(defaultOut, /git -C "\$OPENCODE_DIR" fetch --force --tags --prune origin/);
   assert.match(
     defaultOut,
     /git -C "\$OPENCODE_DIR" checkout -B "\$OPENCODE_REF" "refs\/remotes\/origin\/\$OPENCODE_REF"/,
   );
+  assert.match(defaultOut, /systemd_user_cmd stop opencode-serve\.service/);
   assert.doesNotMatch(defaultOut, /sync opencode repo/);
 
   const withSystemd = runSync([
