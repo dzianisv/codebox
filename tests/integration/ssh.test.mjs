@@ -14,7 +14,7 @@ writeFileSync(
   configPath,
   JSON.stringify({
     last_remote: "cached-user@cached-host",
-    last_base: "$HOME/workspace",
+    last_base: "/srv/legacy-workspace",
   }) + "\n",
 );
 
@@ -67,6 +67,8 @@ try {
   const remoteOut = `${remoteCommand.stdout}\n${remoteCommand.stderr}`;
   assert.match(remoteOut, /\[dry-run\] ssh /);
   assert.match(remoteOut, /cached-user@cached-host bash -lc/);
+  assert.match(remoteOut, /\$HOME\/workspace\/codebox/);
+  assert.doesNotMatch(remoteOut, /\/srv\/legacy-workspace\/codebox/);
   assert.match(remoteOut, /exec .*pwd/);
 
   const tunnelCommand = runTunnel([
@@ -88,6 +90,59 @@ try {
   assert.match(tunnelModeOut, /-f -N/);
   assert.match(tunnelModeOut, /-L 4901:127\.0\.0\.1:4902/);
   assert.match(tunnelModeOut, /cached-user@cached-host/);
+
+  const rememberedTargetsConfigPath = path.join(tempRoot, "remembered-targets.json");
+  writeFileSync(
+    rememberedTargetsConfigPath,
+    JSON.stringify(
+      {
+        known_targets: {
+          "recent-user@vm-2::$HOME/workspace::codebox": {
+            remote: "recent-user@vm-2",
+            remoteHost: "vm-2",
+            sshOpts: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes",
+            base: "$HOME/workspace",
+            repo: "codebox",
+            remoteRepo: "$HOME/workspace/codebox",
+            opencodeLocalPort: 5551,
+            opencodeRemotePort: 5551,
+            lastSyncedAt: "2026-03-29T02:00:00.000Z",
+            updatedAt: "2026-03-29T02:00:00.000Z",
+          },
+          "older-user@vm-1::$HOME/workspace::codebox": {
+            remote: "older-user@vm-1",
+            remoteHost: "vm-1",
+            sshOpts: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes",
+            base: "$HOME/workspace",
+            repo: "codebox",
+            remoteRepo: "$HOME/workspace/codebox",
+            opencodeLocalPort: 5551,
+            opencodeRemotePort: 5551,
+            lastSyncedAt: "2026-03-29T01:00:00.000Z",
+            updatedAt: "2026-03-29T01:00:00.000Z",
+          },
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+
+  const recentRemoteFallback = runSsh([
+    "--config",
+    rememberedTargetsConfigPath,
+    "--dry-run",
+    "--",
+    "pwd",
+  ]);
+  assert.equal(
+    recentRemoteFallback.status,
+    0,
+    `Recent-remote ssh dry-run failed: ${recentRemoteFallback.stderr || recentRemoteFallback.stdout}`,
+  );
+  const recentRemoteOut = `${recentRemoteFallback.stdout}\n${recentRemoteFallback.stderr}`;
+  assert.match(recentRemoteOut, /recent-user@vm-2 bash -lc/);
+  assert.doesNotMatch(recentRemoteOut, /older-user@vm-1 bash -lc/);
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
 }
