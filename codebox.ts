@@ -32,6 +32,7 @@ type Options = {
   syncEnv: boolean;
   envVars: Record<string, string>;
   reinstallOpencode: boolean;
+  disableTailscale: boolean;
   assumeYes: boolean;
   verbose: boolean;
   dryRun: boolean;
@@ -81,6 +82,7 @@ Options:
   --opencode-ref <branch|sha> OpenCode branch or commit for the managed remote checkout (default: "${DEFAULT_OPENCODE_REF}")
   --exclude <pattern>         Extra repo rsync exclude pattern (repeatable)
   --no-opencode-tunnel        Skip auto-starting localhost SSH tunnel to remote OpenCode
+  --disable-tailscale         Skip Tailscale setup; OpenCode serves on 127.0.0.1 only
   --opencode-local-port <n>   Local forwarded port (default: 5551)
   --opencode-remote-port <n>  Remote OpenCode port (default: 5551)
   --opencode-supervisor <m>   Remote OpenCode supervisor: auto|nohup|systemd (default: ${DEFAULT_OPENCODE_SUPERVISOR})
@@ -1351,6 +1353,7 @@ async function main() {
     syncEnv: !hasFlag(args, "--no-env"),
     envVars: {},
     reinstallOpencode: hasFlag(args, "--reinstall-opencode"),
+    disableTailscale: hasFlag(args, "--disable-tailscale"),
     assumeYes,
     verbose,
     dryRun: hasFlag(args, "--dry-run"),
@@ -1685,6 +1688,8 @@ OPENCODE_SYNC_LOCAL_SOURCE=${bashQuote(syncLocalOpencodeRepo ? "1" : "0")}
 OPENCODE_PORT=${bashQuote(String(opts.opencodeRemotePort))}
 OPENCODE_SUPERVISOR=${bashQuote(opts.opencodeSupervisor)}
 OPENCODE_REINSTALL=${bashQuote(opts.reinstallOpencode ? "1" : "0")}
+DISABLE_TAILSCALE=${bashQuote(opts.disableTailscale ? "1" : "0")}
+OPENCODE_HOSTNAME="127.0.0.1"
 
 is_port_listening() {
   if command -v lsof >/dev/null 2>&1; then
@@ -1741,6 +1746,38 @@ resolve_opencode_bin() {
     return 0
   fi
   return 1
+}
+
+ensure_tailscale() {
+  if [ "$DISABLE_TAILSCALE" = "1" ]; then
+    echo "Info: Tailscale disabled via --disable-tailscale"
+    return 0
+  fi
+
+  if ! command -v tailscale >/dev/null 2>&1; then
+    echo "Info: Tailscale not found; installing..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+  fi
+
+  if tailscale status --json 2>/dev/null | grep -q '"BackendState":"Running"'; then
+    echo "Info: Tailscale already authenticated and running"
+  else
+    echo "Info: Starting Tailscale authentication..."
+    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      sudo tailscale up || true
+    else
+      tailscale up || true
+    fi
+  fi
+
+  TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -1)" || true
+  if [ -z "$TAILSCALE_IP" ]; then
+    echo "Warning: Could not get Tailscale IP; falling back to 127.0.0.1 for OpenCode" >&2
+    TAILSCALE_IP="127.0.0.1"
+  else
+    echo "Info: Tailscale IP: $TAILSCALE_IP"
+  fi
+  export TAILSCALE_IP
 }
 
 ensure_opencode_checkout() {
@@ -1802,14 +1839,15 @@ stop_opencode_runtime() {
   if systemd_user_available && [ -f "$HOME/.config/systemd/user/opencode-serve.service" ]; then
     systemd_user_cmd stop opencode-serve.service >/dev/null 2>&1 || true
   fi
-  pkill -f "opencode serve --hostname 127.0.0.1 --port $OPENCODE_PORT" >/dev/null 2>&1 || true
+  pkill -f "opencode serve --hostname .* --port $OPENCODE_PORT" >/dev/null 2>&1 || true
+  pkill -f "opencode serve.*--port $OPENCODE_PORT" >/dev/null 2>&1 || true
   for _ in $(seq 1 15); do
     if ! is_port_listening "$OPENCODE_PORT"; then
       return 0
     fi
     sleep 1
   done
-  echo "Warning: timed out waiting for OpenCode to stop on 127.0.0.1:$OPENCODE_PORT"
+  echo "Warning: timed out waiting for OpenCode to stop on $OPENCODE_HOSTNAME:$OPENCODE_PORT"
 }
 
 install_opencode_local() {
@@ -1868,20 +1906,20 @@ install_opencode_local() {
 
 start_opencode_nohup() {
   if is_port_listening "$OPENCODE_PORT"; then
-    echo "Info: OpenCode already listening on 127.0.0.1:$OPENCODE_PORT"
+    echo "Info: OpenCode already listening on $OPENCODE_HOSTNAME:$OPENCODE_PORT"
     return 0
   fi
   mkdir -p "$HOME/.cache/codebox"
   if ! (
     cd "$OPENCODE_DIR" &&
     OPENCODE_DISABLE_CHANNEL_DB="\${OPENCODE_DISABLE_CHANNEL_DB:-1}" \
-    nohup "$OPENCODE_BIN" serve --hostname 127.0.0.1 --port "$OPENCODE_PORT" \
+    nohup "$OPENCODE_BIN" serve --hostname "$OPENCODE_HOSTNAME" --port "$OPENCODE_PORT" \
       > "$HOME/.cache/codebox/opencode-serve.log" 2>&1 &
   ); then
     echo "Warning: failed to start OpenCode serve from $OPENCODE_DIR via nohup."
     return 1
   fi
-  echo "Info: started OpenCode serve via nohup on 127.0.0.1:$OPENCODE_PORT (log: ~/.cache/codebox/opencode-serve.log)"
+  echo "Info: started OpenCode serve via nohup on $OPENCODE_HOSTNAME:$OPENCODE_PORT (log: ~/.cache/codebox/opencode-serve.log)"
 }
 
 write_opencode_systemd_unit() {
@@ -1895,7 +1933,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$OPENCODE_DIR
-ExecStart=/bin/bash -lc 'if [ -f "$HOME/.config/codebox/env.sh" ]; then . "$HOME/.config/codebox/env.sh"; fi; if [ -x "$HOME/.local/bin/opencode" ]; then OPENCODE_BIN="$HOME/.local/bin/opencode"; elif [ -x "$HOME/.opencode/bin/opencode" ]; then OPENCODE_BIN="$HOME/.opencode/bin/opencode"; else OPENCODE_BIN="$(command -v opencode)"; fi; export OPENCODE_DISABLE_CHANNEL_DB="\${OPENCODE_DISABLE_CHANNEL_DB:-1}"; exec "\\$OPENCODE_BIN" serve --hostname 127.0.0.1 --port ${opts.opencodeRemotePort}'
+ExecStart=/bin/bash -lc 'if [ -f "$HOME/.config/codebox/env.sh" ]; then . "$HOME/.config/codebox/env.sh"; fi; if [ -x "$HOME/.local/bin/opencode" ]; then OPENCODE_BIN="$HOME/.local/bin/opencode"; elif [ -x "$HOME/.opencode/bin/opencode" ]; then OPENCODE_BIN="$HOME/.opencode/bin/opencode"; else OPENCODE_BIN="$(command -v opencode)"; fi; export OPENCODE_DISABLE_CHANNEL_DB="\${OPENCODE_DISABLE_CHANNEL_DB:-1}"; exec "\\$OPENCODE_BIN" serve --hostname "$OPENCODE_HOSTNAME" --port ${opts.opencodeRemotePort}'
 Restart=always
 RestartSec=2
 StandardOutput=append:%h/.cache/codebox/opencode-serve.log
@@ -1917,6 +1955,14 @@ start_opencode_systemd() {
   systemd_user_cmd restart opencode-serve.service >/dev/null
   echo "Info: ensured OpenCode systemd user service opencode-serve.service"
 }
+
+TAILSCALE_IP="127.0.0.1"
+ensure_tailscale
+if [ "$DISABLE_TAILSCALE" = "1" ]; then
+  OPENCODE_HOSTNAME="127.0.0.1"
+else
+  OPENCODE_HOSTNAME="\${TAILSCALE_IP:-127.0.0.1}"
+fi
 
 ${envSetup}if ! command -v devbox >/dev/null 2>&1; then
   curl -fsSL https://get.jetpack.io/devbox | bash -s -- -f
