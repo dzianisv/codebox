@@ -21,6 +21,7 @@ type Options = {
   opencodeLocalPort: number;
   opencodeRemotePort: number;
   opencodeSupervisor: OpencodeSupervisor;
+  syncRepo: boolean;
   syncGit: boolean;
   syncCodexConfig: boolean;
   syncOpencodeConfig: boolean;
@@ -30,6 +31,7 @@ type Options = {
   includeCodexHistory: boolean;
   syncEnv: boolean;
   envVars: Record<string, string>;
+  reinstallOpencode: boolean;
   assumeYes: boolean;
   verbose: boolean;
   dryRun: boolean;
@@ -85,6 +87,7 @@ Options:
   --list                      Tunnel mode only: show remembered tunnel targets
   --all                       Tunnel mode only: start/reconcile all remembered tunnel targets
   --no-git                    Do NOT sync .git (default: sync .git)
+  --no-repo                   Skip syncing the workspace repo entirely
   --no-codex-config           Skip syncing ~/.codex
   --no-opencode-config        Skip syncing ~/.config/opencode and ~/.opencode
   --no-opencode-auth          Skip syncing ~/.local/share/opencode auth state
@@ -94,6 +97,7 @@ Options:
   --no-env                    Do NOT sync env vars to the remote shell/OpenCode env
   --env <NAME>                Also sync a specific env var (repeatable)
   --env-prefix <PREFIX>       Sync env vars with this prefix (repeatable)
+  --reinstall-opencode        Force reinstall of OpenCode on the remote (stops service, re-runs install hooks)
   --yes                       Assume yes for prompts (env/ssh sync)
   -v, --verbose               Verbose rsync output (progress)
   --dry-run                   Print actions without executing
@@ -672,6 +676,7 @@ function parseSshModeArgs(rawArgs: string[]): ParsedSshModeArgs {
   const boolFlags = new Set([
     "--no-opencode-tunnel",
     "--no-git",
+    "--no-repo",
     "--no-codex-config",
     "--no-opencode-config",
     "--no-opencode-auth",
@@ -683,6 +688,7 @@ function parseSshModeArgs(rawArgs: string[]): ParsedSshModeArgs {
     "--verbose",
     "-v",
     "--dry-run",
+    "--reinstall-opencode",
   ]);
   const sshFlagsWithValue = new Set([
     "-B",
@@ -1334,6 +1340,7 @@ async function main() {
     opencodeLocalPort: resolvedOpencodeLocalPort,
     opencodeRemotePort,
     opencodeSupervisor,
+    syncRepo: !hasFlag(args, "--no-repo"),
     syncGit: !hasFlag(args, "--no-git"),
     syncCodexConfig: !hasFlag(args, "--no-codex-config"),
     syncOpencodeConfig,
@@ -1343,6 +1350,7 @@ async function main() {
     includeCodexHistory: hasFlag(args, "--include-codex-history"),
     syncEnv: !hasFlag(args, "--no-env"),
     envVars: {},
+    reinstallOpencode: hasFlag(args, "--reinstall-opencode"),
     assumeYes,
     verbose,
     dryRun: hasFlag(args, "--dry-run"),
@@ -1483,16 +1491,18 @@ async function main() {
 
   const actions: Array<{ label: string; cmd: string[]; stdin?: string }> = [];
 
-  actions.push({
-    label: "sync repo",
-    cmd: rsyncCmd(
-      opts.sshOpts,
-      `${repoRoot}/`,
-      `${opts.remote}:${remoteRepo}/`,
-      repoExcludes,
-      opts.verbose,
-    ),
-  });
+  if (opts.syncRepo) {
+    actions.push({
+      label: "sync repo",
+      cmd: rsyncCmd(
+        opts.sshOpts,
+        `${repoRoot}/`,
+        `${opts.remote}:${remoteRepo}/`,
+        repoExcludes,
+        opts.verbose,
+      ),
+    });
+  }
 
   if (syncLocalOpencodeRepo) {
     actions.push({
@@ -1674,6 +1684,7 @@ OPENCODE_REF=${bashQuote(opts.opencodeRef)}
 OPENCODE_SYNC_LOCAL_SOURCE=${bashQuote(syncLocalOpencodeRepo ? "1" : "0")}
 OPENCODE_PORT=${bashQuote(String(opts.opencodeRemotePort))}
 OPENCODE_SUPERVISOR=${bashQuote(opts.opencodeSupervisor)}
+OPENCODE_REINSTALL=${bashQuote(opts.reinstallOpencode ? "1" : "0")}
 
 is_port_listening() {
   if command -v lsof >/dev/null 2>&1; then
@@ -1914,7 +1925,6 @@ fi
 mkdir -p "$REPO_DIR" "$OPENCODE_DIR" ~/.config/opencode ~/.opencode ~/.codex ~/.config/gh ~/.local/bin ~/.local/share/opencode
 
 ensure_opencode_checkout
-
 cat > "$REPO_DIR/devbox.json" <<'EOF'
 ${devboxCodexJson}
 EOF
@@ -1935,7 +1945,11 @@ fi
 if [ -d "$OPENCODE_DIR" ]; then
   cd "$OPENCODE_DIR"
   devbox install
-  if ! install_opencode_local; then
+  if [ "$OPENCODE_REINSTALL" = "1" ]; then
+    if ! install_opencode_local; then
+      echo "Warning: OpenCode reinstall failed; continuing bootstrap."
+    fi
+  elif ! install_opencode_local; then
     echo "Warning: OpenCode local install failed; continuing bootstrap."
   fi
 fi
