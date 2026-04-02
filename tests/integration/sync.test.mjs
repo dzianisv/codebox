@@ -124,7 +124,7 @@ try {
   assert.match(systemdOut, /WorkingDirectory=\$OPENCODE_DIR/);
   assert.match(
     systemdOut,
-    /ExecStart=.*\$HOME\/\.local\/bin\/opencode.*\$HOME\/\.opencode\/bin\/opencode.*export OPENCODE_DISABLE_CHANNEL_DB="\$\{OPENCODE_DISABLE_CHANNEL_DB:-1\}".*exec "\\\$OPENCODE_BIN" serve --hostname 127\.0\.0\.1 --port 5551/,
+    /ExecStart=.*\$HOME\/\.local\/bin\/opencode.*\$HOME\/\.opencode\/bin\/opencode.*export OPENCODE_DISABLE_CHANNEL_DB="\$\{OPENCODE_DISABLE_CHANNEL_DB:-1\}".*exec "\\\$OPENCODE_BIN" serve --hostname "\$OPENCODE_HOSTNAME" --port 4096/,
   );
   assert.match(systemdOut, /opencode-serve\.service/);
   assert.match(systemdOut, /systemctl --user/);
@@ -143,7 +143,7 @@ try {
   const nohupOut = `${withNohup.stdout}\n${withNohup.stderr}`;
   assert.match(
     nohupOut,
-    /cd "\$OPENCODE_DIR" &&[\s\S]*OPENCODE_DISABLE_CHANNEL_DB="\$\{OPENCODE_DISABLE_CHANNEL_DB:-1\}"[\s\S]*nohup "\$OPENCODE_BIN" serve --hostname 127\.0\.0\.1 --port "\$OPENCODE_PORT"/,
+    /cd "\$OPENCODE_DIR" &&[\s\S]*OPENCODE_DISABLE_CHANNEL_DB="\$\{OPENCODE_DISABLE_CHANNEL_DB:-1\}"[\s\S]*nohup "\$OPENCODE_BIN" serve --hostname "\$OPENCODE_HOSTNAME" --port "\$OPENCODE_PORT"/,
   );
 
   const withoutAuth = runSync(["--no-opencode-auth", "--opencode-src", goodOpencodeRepo]);

@@ -67,8 +67,8 @@ codebox tunnel --all
 - Syncs env vars into a managed remote shell/OpenCode env file and wires remote `~/.bashrc` to source it (defaults include `GITHUB_TOKEN`, `OPENAI_*`, `AZURE_OPENAI_*`, `OPENCODE_*`, `CODEX_*`, and any `*_TOKEN`). Use `--no-env`, `--env`, `--env-prefix` to control.
 - Prompts before syncing secrets or `~/.ssh` unless `--yes` is provided.
 - Use `-v/--verbose` for rsync progress output.
-- Sync mode now ensures OpenCode is running on remote (`127.0.0.1:5551`) and starts a background local SSH tunnel by default:
-  - `localhost:5551 -> remote:127.0.0.1:5551`
+- Sync mode now ensures OpenCode is running on remote (`127.0.0.1:4096`) and starts a background local SSH tunnel by default:
+  - `localhost:4096 -> remote:127.0.0.1:4096`
   - disable with `--no-opencode-tunnel`
   - override ports with `--opencode-local-port <n>` and `--opencode-remote-port <n>`
   - when the preferred local port is already occupied, `codebox` automatically picks the next free localhost port and remembers it for that remote target

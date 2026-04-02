@@ -44,6 +44,8 @@ type CodeboxConfig = Record<string, unknown>;
 type KnownTarget = {
   remote: string;
   remoteHost?: string;
+  tailscaleIp?: string;
+  publicIp?: string;
   sshOpts?: string;
   base: string;
   repo: string;
@@ -70,6 +72,7 @@ function usage(): string {
   return `Usage:
   ./codebox.ts [--remote <user@host>] [options]
   ./codebox.ts ssh [<user@host>] [options] [ssh-options] [-- <remote command...>]
+  ./codebox.ts list [--repo <name>]                List all remembered VM targets
   ./codebox.ts tunnel [<user@host>] [options]
 
 Options:
@@ -83,8 +86,8 @@ Options:
   --exclude <pattern>         Extra repo rsync exclude pattern (repeatable)
   --no-opencode-tunnel        Skip auto-starting localhost SSH tunnel to remote OpenCode
   --disable-tailscale         Skip Tailscale setup; OpenCode serves on 127.0.0.1 only
-  --opencode-local-port <n>   Local forwarded port (default: 5551)
-  --opencode-remote-port <n>  Remote OpenCode port (default: 5551)
+  --opencode-local-port <n>   Local forwarded port (default: 4096)
+  --opencode-remote-port <n>  Remote OpenCode port (default: 4096)
   --opencode-supervisor <m>   Remote OpenCode supervisor: auto|nohup|systemd (default: ${DEFAULT_OPENCODE_SUPERVISOR})
   --list                      Tunnel mode only: show remembered tunnel targets
   --all                       Tunnel mode only: start/reconcile all remembered tunnel targets
@@ -211,6 +214,8 @@ function parseKnownTarget(value: unknown): KnownTarget | undefined {
   return {
     remote,
     remoteHost: typeof value.remoteHost === "string" ? value.remoteHost : undefined,
+    tailscaleIp: typeof value.tailscaleIp === "string" ? value.tailscaleIp : undefined,
+    publicIp: typeof value.publicIp === "string" ? value.publicIp : undefined,
     sshOpts: typeof value.sshOpts === "string" ? value.sshOpts : undefined,
     base,
     repo,
@@ -1024,6 +1029,36 @@ async function readRemoteHostname(
   return hostname || undefined;
 }
 
+async function readRemoteTailscaleIp(
+  remote: string,
+  sshOpts: string,
+): Promise<string | undefined> {
+  const sshArgs = shellSplit(sshOpts).map(expandTildeArg);
+  const result = await runCapture(["ssh", ...sshArgs, remote, "tailscale", "ip", "-4"]);
+  if (result.code !== 0) return undefined;
+  const ip = result.stdout.trim().split(/\s+/)[0];
+  return ip || undefined;
+}
+
+async function readRemotePublicIp(
+  remote: string,
+  sshOpts: string,
+): Promise<string | undefined> {
+  const sshArgs = shellSplit(sshOpts).map(expandTildeArg);
+  // Try hostname -I first (gets all IPs, first one is usually public), fall back to curl
+  let result = await runCapture([
+    "ssh",
+    ...sshArgs,
+    remote,
+    "bash",
+    "-c",
+    "curl -sf --max-time 3 https://ifconfig.me || curl -sf --max-time 3 https://api.ipify.org || hostname -I | awk '{print $1}'",
+  ]);
+  if (result.code !== 0) return undefined;
+  const ip = result.stdout.trim().split(/\s+/)[0];
+  return ip || undefined;
+}
+
 function formatKnownTargetLine(params: {
   target: KnownTarget;
   status: "active" | "inactive" | "occupied";
@@ -1106,8 +1141,8 @@ function rsyncCmd(
 
 async function main() {
   const rawArgs = process.argv.slice(2);
-  const mode = rawArgs[0] === "ssh" ? "ssh" : rawArgs[0] === "tunnel" ? "tunnel" : "sync";
-  let args = (mode === "ssh" || mode === "tunnel") ? rawArgs.slice(1) : rawArgs;
+  const mode = rawArgs[0] === "ssh" ? "ssh" : rawArgs[0] === "tunnel" ? "tunnel" : rawArgs[0] === "list" ? "list" : "sync";
+  let args = (mode === "ssh" || mode === "tunnel" || mode === "list") ? rawArgs.slice(1) : rawArgs;
   let sshExecArgs: string[] = [];
   let sshPassthroughArgs: string[] = [];
   let positionalRemote: string | undefined = findPositionalRemote(args);
@@ -1131,7 +1166,7 @@ async function main() {
   const existingConfig = readConfig(configPath);
   const tunnelListMode = mode === "tunnel" && hasFlag(args, "--list");
   const tunnelAllMode = mode === "tunnel" && hasFlag(args, "--all");
-  const requestedRepo = mode === "tunnel" ? argValue(args, "--repo") : undefined;
+  const requestedRepo = (mode === "tunnel" || mode === "list") ? argValue(args, "--repo") : undefined;
   if (tunnelListMode && tunnelAllMode) {
     throw new Error("Cannot combine --list and --all in tunnel mode.");
   }
@@ -1142,7 +1177,7 @@ async function main() {
   const requestedRemoteHint =
     argValue(args, "--remote") ?? positionalRemote ?? process.env.REMOTE;
   const rememberedTarget =
-    !tunnelListMode && !tunnelAllMode
+    !tunnelListMode && !tunnelAllMode && mode !== "list"
       ? await resolveRememberedTarget({
           config: existingConfig,
           repo: repoName,
@@ -1151,7 +1186,7 @@ async function main() {
           requireRepoMatch: Boolean(requestedRepo),
         })
       : undefined;
-  if (requestedRepo && !tunnelListMode && !tunnelAllMode && !rememberedTarget) {
+  if (requestedRepo && !tunnelListMode && !tunnelAllMode && mode !== "list" && !rememberedTarget) {
     throw new Error(`No remembered target found for repo "${requestedRepo}".`);
   }
 
@@ -1190,6 +1225,39 @@ async function main() {
     }
     for (const line of lines) {
       console.log(line);
+    }
+    return;
+  }
+
+  if (mode === "list") {
+    const listedConfig = requestedRepo
+      ? {
+          ...existingConfig,
+          known_targets: Object.fromEntries(
+            getKnownTargetEntries(existingConfig).filter(([, target]) => target.repo === requestedRepo),
+          ),
+        }
+      : existingConfig;
+    const targets = getKnownTargetEntries(listedConfig)
+      .map(([, target]) => target)
+      .sort((left, right) => {
+        const a = knownTargetActivityStamp(left);
+        const b = knownTargetActivityStamp(right);
+        return b.localeCompare(a);
+      });
+    if (targets.length === 0) {
+      console.log("[codebox] No remembered targets.");
+      return;
+    }
+    for (const target of targets) {
+      const vmName = target.remoteHost ?? target.remote;
+      const publicIp = target.publicIp ?? "-";
+      const tailscaleIp = target.tailscaleIp;
+      const remotePort = target.opencodeRemotePort;
+      const endpoint = tailscaleIp
+        ? `http://${tailscaleIp}:${remotePort}`
+        : `http://127.0.0.1:${remotePort}`;
+      console.log(`${vmName}\t${publicIp}\t${endpoint}`);
     }
     return;
   }
@@ -1296,12 +1364,12 @@ async function main() {
   const parsedOpencodeLocalPort = parsePort(
     opencodeLocalPortRaw,
     "--opencode-local-port",
-    5551,
+    4096,
   );
   const opencodeRemotePort = parsePort(
     argValue(args, "--opencode-remote-port") ?? process.env.OPENCODE_REMOTE_PORT,
     "--opencode-remote-port",
-    5551,
+    4096,
   );
   const opencodeSupervisor = parseOpencodeSupervisor(
     argValue(args, "--opencode-supervisor") ?? process.env.OPENCODE_SUPERVISOR,
@@ -2094,11 +2162,15 @@ mkdir -p "$HOME/.local/share/opencode" "$HOME/.config/codebox"
   const currentKnownTarget = findKnownTarget(existingConfig, opts.remote, opts.base, repoName)?.target;
   const updatedAt = new Date().toISOString();
   const remoteHost = await readRemoteHostname(opts.remote, opts.sshOpts);
+  const tailscaleIp = opts.disableTailscale ? undefined : await readRemoteTailscaleIp(opts.remote, opts.sshOpts);
+  const publicIp = await readRemotePublicIp(opts.remote, opts.sshOpts);
   const nextConfig = upsertKnownTarget(
     existingConfig,
     {
       remote: opts.remote,
       remoteHost,
+      tailscaleIp,
+      publicIp,
       sshOpts: opts.sshOpts,
       base: opts.base,
       repo: repoName,
