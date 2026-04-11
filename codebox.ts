@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { basename, resolve } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 
 type OpencodeSupervisor = "auto" | "nohup" | "systemd";
@@ -27,6 +27,7 @@ type Options = {
   syncOpencodeConfig: boolean;
   syncOpencodeAuth: boolean;
   syncGhConfig: boolean;
+  syncKubeConfig: boolean;
   syncSshKeys: boolean;
   includeCodexHistory: boolean;
   syncEnv: boolean;
@@ -97,6 +98,7 @@ Options:
   --no-opencode-config        Skip syncing ~/.config/opencode and ~/.opencode
   --no-opencode-auth          Skip syncing ~/.local/share/opencode auth state
   --no-gh-config              Skip syncing ~/.config/gh
+  --no-kube-config            Skip syncing ~/.kube
   --sync-ssh                  Sync ~/.ssh (includes private keys) [off by default]
   --include-codex-history     Include ~/.codex/history.jsonl (default: excluded)
   --no-env                    Do NOT sync env vars to the remote shell/OpenCode env
@@ -1416,6 +1418,7 @@ async function main() {
     syncOpencodeConfig,
     syncOpencodeAuth,
     syncGhConfig: !hasFlag(args, "--no-gh-config"),
+    syncKubeConfig: !hasFlag(args, "--no-kube-config"),
     syncSshKeys: hasFlag(args, "--sync-ssh"),
     includeCodexHistory: hasFlag(args, "--include-codex-history"),
     syncEnv: !hasFlag(args, "--no-env"),
@@ -1649,6 +1652,40 @@ async function main() {
         });
       }
     }
+
+    // Sync opencode agents/skills/commands customizations
+    for (const entry of ["agents", "skills", "AGENTS.md", "commands"] as const) {
+      const source = resolve(opencodeConfig, entry);
+      if (!existsSync(source)) continue;
+      const isDir = statSync(source).isDirectory();
+      actions.push({
+        label: `sync ~/.config/opencode/${entry}`,
+        cmd: rsyncCmd(
+          opts.sshOpts,
+          isDir ? `${source}/` : source,
+          isDir
+            ? `${opts.remote}:~/.config/opencode/${entry}/`
+            : `${opts.remote}:~/.config/opencode/${entry}`,
+          [],
+          opts.verbose,
+        ),
+      });
+    }
+
+    // Sync ~/.agents/ (global agent skills/memory)
+    const agentsHome = resolve(os.homedir(), ".agents");
+    if (existsSync(agentsHome)) {
+      actions.push({
+        label: "sync ~/.agents",
+        cmd: rsyncCmd(
+          opts.sshOpts,
+          `${agentsHome}/`,
+          `${opts.remote}:~/.agents/`,
+          [],
+          opts.verbose,
+        ),
+      });
+    }
   }
 
   if (opts.syncGhConfig) {
@@ -1660,6 +1697,22 @@ async function main() {
           opts.sshOpts,
           `${ghConfig}/`,
           `${opts.remote}:~/.config/gh/`,
+          [],
+          opts.verbose,
+        ),
+      });
+    }
+  }
+
+  if (opts.syncKubeConfig) {
+    const kubeDir = resolve(os.homedir(), ".kube");
+    if (existsSync(kubeDir)) {
+      actions.push({
+        label: "sync ~/.kube",
+        cmd: rsyncCmd(
+          opts.sshOpts,
+          `${kubeDir}/`,
+          `${opts.remote}:~/.kube/`,
           [],
           opts.verbose,
         ),
@@ -1696,7 +1749,7 @@ async function main() {
   "packages": ["git","rustc","cargo","pkg-config","openssl","libcap","gcc","bun"]
 }\n`;
   const devboxOpencodeJson = `{
-  "packages": ["git","bun"]
+  "packages": ["git","bun","nodejs_22"]
 }\n`;
 
   const envLines = Object.entries(opts.envVars)
@@ -1932,6 +1985,9 @@ install_opencode_local() {
       export OPENCODE_CHANNEL="\${OPENCODE_CHANNEL:-latest}"
     fi
   }
+
+  echo "Info: Running bun install in $OPENCODE_DIR"
+  devbox run -- bash -lc "bun install" || echo "Warning: bun install failed; build may fail if deps are missing."
 
   if [ -x "./scripts/install-local.sh" ]; then
     attempted=1
