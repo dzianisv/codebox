@@ -94,6 +94,62 @@ try {
   assert.match(defaultOut, /systemd_user_cmd stop opencode-serve\.service/);
   assert.doesNotMatch(defaultOut, /sync opencode repo/);
 
+  // Default sync must explicitly --include .git so it is always transferred
+  const defaultRepoLine = defaultOut.split("\n").find((l) => l.includes("sync repo:"));
+  assert.ok(defaultRepoLine, "Expected a 'sync repo:' line in dry-run output");
+  assert.match(
+    defaultRepoLine,
+    /--include \.git --include \.git\/\*\*/,
+    "Default sync should explicitly include .git",
+  );
+  assert.doesNotMatch(
+    defaultRepoLine,
+    /--exclude \.git/,
+    "Default repo sync should not exclude .git",
+  );
+
+  // --no-git must exclude .git and must NOT include it
+  const noGitSync = runSync(["--no-git"]);
+  assert.equal(
+    noGitSync.status,
+    0,
+    `--no-git sync dry-run failed: ${noGitSync.stderr || noGitSync.stdout}`,
+  );
+  const noGitOut = `${noGitSync.stdout}\n${noGitSync.stderr}`;
+  const noGitRepoLine = noGitOut.split("\n").find((l) => l.includes("sync repo:"));
+  assert.ok(noGitRepoLine, "Expected a 'sync repo:' line in --no-git dry-run output");
+  assert.match(
+    noGitRepoLine,
+    /--exclude \.git/,
+    "--no-git should exclude .git",
+  );
+  assert.doesNotMatch(
+    noGitRepoLine,
+    /--include \.git/,
+    "--no-git should not include .git",
+  );
+
+  // User-provided --exclude for a .git sub-path must appear BEFORE the
+  // protective --include rules so rsync's first-match-wins honours it.
+  const userExcludeSync = runSync(["--exclude", ".git/config"]);
+  assert.equal(
+    userExcludeSync.status,
+    0,
+    `--exclude .git/config sync dry-run failed: ${userExcludeSync.stderr || userExcludeSync.stdout}`,
+  );
+  const userExcludeOut = `${userExcludeSync.stdout}\n${userExcludeSync.stderr}`;
+  const userExcludeRepoLine = userExcludeOut.split("\n").find((l) => l.includes("sync repo:"));
+  assert.ok(userExcludeRepoLine, "Expected a 'sync repo:' line in --exclude .git/config dry-run output");
+  // The user exclude must come before the include so it is not overridden
+  const excludeIdx = userExcludeRepoLine.indexOf("--exclude .git/config");
+  const includeIdx = userExcludeRepoLine.indexOf("--include .git");
+  assert.ok(excludeIdx >= 0, "User --exclude .git/config must appear in repo sync command");
+  assert.ok(includeIdx >= 0, "Protective --include .git must still appear in repo sync command");
+  assert.ok(
+    excludeIdx < includeIdx,
+    `User --exclude .git/config (pos ${excludeIdx}) must precede --include .git (pos ${includeIdx})`,
+  );
+
   const withSystemd = runSync([
     "--opencode-supervisor",
     "systemd",

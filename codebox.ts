@@ -1122,6 +1122,8 @@ function rsyncCmd(
   dest: string,
   excludes: string[] = [],
   verbose = false,
+  includes: string[] = [],
+  userExcludes: string[] = [],
 ) {
   const cmd = [
     "rsync",
@@ -1134,6 +1136,18 @@ function rsyncCmd(
     cmd.push("-v", "--progress");
   }
   cmd.push("-e", `ssh ${sshOpts}`);
+  // rsync uses first-match-wins, so ordering matters:
+  //  1. User-provided excludes — explicit user intent always takes priority
+  //     (e.g. --exclude .git/config must not be overridden by an include).
+  //  2. Protective includes — guard paths like .git from built-in excludes
+  //     and system-level filters.
+  //  3. Built-in excludes — heavy dirs (node_modules, dist, …).
+  for (const ex of userExcludes) {
+    cmd.push("--exclude", ex);
+  }
+  for (const inc of includes) {
+    cmd.push("--include", inc);
+  }
   for (const ex of excludes) {
     cmd.push("--exclude", ex);
   }
@@ -1552,15 +1566,22 @@ async function main() {
     return;
   }
 
-  const repoExcludes = [
+  const builtinExcludes = [
     "codex-rs/target*",
     "node_modules",
     "dist",
     ".venv",
-    ...opts.repoExcludes,
   ];
-  if (!opts.syncGit) {
-    repoExcludes.unshift(".git");
+  // Explicit --include rules for .git so rsync's first-match-wins logic
+  // keeps the directory even when a system-level filter or built-in exclude
+  // would otherwise drop it.  User-provided excludes (opts.repoExcludes)
+  // are emitted first so they can still override the includes when the
+  // user explicitly targets paths under .git (e.g. --exclude .git/config).
+  const repoIncludes: string[] = [];
+  if (opts.syncGit) {
+    repoIncludes.push(".git", ".git/**");
+  } else {
+    builtinExcludes.unshift(".git");
   }
 
   const actions: Array<{ label: string; cmd: string[]; stdin?: string }> = [];
@@ -1572,8 +1593,10 @@ async function main() {
         opts.sshOpts,
         `${repoRoot}/`,
         `${opts.remote}:${remoteRepo}/`,
-        repoExcludes,
+        builtinExcludes,
         opts.verbose,
+        repoIncludes,
+        opts.repoExcludes,
       ),
     });
   }
