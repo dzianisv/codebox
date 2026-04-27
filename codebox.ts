@@ -80,7 +80,8 @@ Options:
   --remote <user@host>        SSH target (default: recent remembered target)
   --ssh-opts <string>         SSH options (default: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes")
   --base <path>               Remote base dir (default: "${DEFAULT_BASE}")
-  --repo <name>               Tunnel mode only: remembered repo to target instead of current working directory
+  --repo <name>               Tunnel/list/resync filter: remembered repo to target
+  --resync                    Sync mode only: re-sync all remembered targets (optionally filtered by --repo)
   --opencode-src <path>       Optional local opencode repo path to sync instead of managed remote checkout
   --opencode-repo-url <url>   OpenCode git remote to anchor on the target (default: "${DEFAULT_OPENCODE_REPO_URL}")
   --opencode-ref <branch|sha> OpenCode branch or commit for the managed remote checkout (default: "${DEFAULT_OPENCODE_REF}")
@@ -123,6 +124,8 @@ Example:
   ./codebox.ts tunnel --repo termux-app
   ./codebox.ts tunnel --list
   ./codebox.ts tunnel --all
+  ./codebox.ts --resync
+  ./codebox.ts --resync --repo termux-app --dry-run
   ./codebox.ts ssh --remote azureuser@dev-1 -- git status -sb
 `;
 }
@@ -1155,6 +1158,130 @@ function rsyncCmd(
   return cmd;
 }
 
+function resolveResyncLocalRepoPath(params: {
+  cwdRepoRoot: string;
+  cwdRepoName: string;
+  targetRepo: string;
+}): { path: string; source: "cwd" | "sibling"; attempted?: string } | undefined {
+  if (params.targetRepo === params.cwdRepoName) {
+    return { path: params.cwdRepoRoot, source: "cwd" };
+  }
+
+  const siblingPath = resolve(params.cwdRepoRoot, "..", params.targetRepo);
+  if (existsSync(siblingPath)) {
+    try {
+      if (statSync(siblingPath).isDirectory()) {
+        return { path: siblingPath, source: "sibling" };
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  return { path: siblingPath, source: "sibling", attempted: siblingPath };
+}
+
+async function runResync(params: {
+  args: string[];
+  config: CodeboxConfig;
+  configPath: string;
+  cwdRepoRoot: string;
+  cwdRepoName: string;
+  requestedRepo?: string;
+  sshOpts: string;
+  verbose: boolean;
+}): Promise<void> {
+  const targets = selectKnownTargets(params.config, { repo: params.requestedRepo });
+  if (targets.length === 0) {
+    const scope = params.requestedRepo ? ` for repo "${params.requestedRepo}"` : "";
+    console.log(`[codebox] No remembered targets to resync${scope}.`);
+    return;
+  }
+
+  const syncRepo = !hasFlag(params.args, "--no-repo");
+  const syncGit = !hasFlag(params.args, "--no-git");
+  const dryRun = hasFlag(params.args, "--dry-run");
+  const repoExcludes = argValues(params.args, "--exclude");
+  const builtinExcludes = [
+    "codex-rs/target*",
+    "node_modules",
+    "dist",
+    ".venv",
+  ];
+  const repoIncludes = syncGit ? [".git", ".git/**"] : [];
+  const repoExcludesWithBuiltin = syncGit ? builtinExcludes : [".git", ...builtinExcludes];
+
+  let nextConfig = params.config;
+  for (const target of targets) {
+    const localRepo = resolveResyncLocalRepoPath({
+      cwdRepoRoot: params.cwdRepoRoot,
+      cwdRepoName: params.cwdRepoName,
+      targetRepo: target.repo,
+    });
+    if (!localRepo || !existsSync(localRepo.path)) {
+      const attemptedPath = localRepo?.attempted ?? resolve(params.cwdRepoRoot, "..", target.repo);
+      console.log(
+        `[codebox] Skipping ${target.remote} repo=${target.repo}: no local path found at ${attemptedPath}`,
+      );
+      continue;
+    }
+    try {
+      if (!statSync(localRepo.path).isDirectory()) {
+        console.log(
+          `[codebox] Skipping ${target.remote} repo=${target.repo}: local path is not a directory at ${localRepo.path}`,
+        );
+        continue;
+      }
+    } catch {
+      console.log(
+        `[codebox] Skipping ${target.remote} repo=${target.repo}: no local path found at ${localRepo.path}`,
+      );
+      continue;
+    }
+
+    if (!syncRepo) {
+      console.log(`[codebox] Skipping ${target.remote} repo=${target.repo}: --no-repo set`);
+      continue;
+    }
+
+    const cliSshOpts = argValue(params.args, "--ssh-opts");
+    const targetSshOpts = cliSshOpts ?? target.sshOpts ?? params.sshOpts;
+    const cmd = rsyncCmd(
+      targetSshOpts,
+      `${localRepo.path}/`,
+      `${target.remote}:${target.remoteRepo}/`,
+      repoExcludesWithBuiltin,
+      params.verbose,
+      repoIncludes,
+      repoExcludes,
+    );
+    if (dryRun) {
+      console.log(
+        `[dry-run] resync target remote=${target.remote} repo=${target.repo} local=${localRepo.path} source=${localRepo.source}`,
+      );
+      console.log(`[dry-run] sync repo: ${cmd.join(" ")}`);
+      continue;
+    }
+
+    const sshArgs = shellSplit(targetSshOpts).map(expandTildeArg);
+    await run(["ssh", ...sshArgs, target.remote, "mkdir", "-p", target.remoteRepo]);
+    await run(cmd);
+    const updatedAt = new Date().toISOString();
+    nextConfig = upsertKnownTarget(
+      nextConfig,
+      {
+        ...target,
+        sshOpts: targetSshOpts,
+        lastSyncedAt: updatedAt,
+      },
+      updatedAt,
+    );
+  }
+
+  if (!dryRun) {
+    writeConfig(params.configPath, nextConfig);
+  }
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   const mode = rawArgs[0] === "ssh" ? "ssh" : rawArgs[0] === "tunnel" ? "tunnel" : rawArgs[0] === "list" ? "list" : "sync";
@@ -1182,7 +1309,8 @@ async function main() {
   const existingConfig = readConfig(configPath);
   const tunnelListMode = mode === "tunnel" && hasFlag(args, "--list");
   const tunnelAllMode = mode === "tunnel" && hasFlag(args, "--all");
-  const requestedRepo = (mode === "tunnel" || mode === "list") ? argValue(args, "--repo") : undefined;
+  const resyncMode = mode === "sync" && hasFlag(args, "--resync");
+  const requestedRepo = (mode === "tunnel" || mode === "list" || resyncMode) ? argValue(args, "--repo") : undefined;
   if (tunnelListMode && tunnelAllMode) {
     throw new Error("Cannot combine --list and --all in tunnel mode.");
   }
@@ -1193,7 +1321,7 @@ async function main() {
   const requestedRemoteHint =
     argValue(args, "--remote") ?? positionalRemote ?? process.env.REMOTE;
   const rememberedTarget =
-    !tunnelListMode && !tunnelAllMode && mode !== "list"
+    !resyncMode && !tunnelListMode && !tunnelAllMode && mode !== "list"
       ? await resolveRememberedTarget({
           config: existingConfig,
           repo: repoName,
@@ -1202,7 +1330,7 @@ async function main() {
           requireRepoMatch: Boolean(requestedRepo),
         })
       : undefined;
-  if (requestedRepo && !tunnelListMode && !tunnelAllMode && mode !== "list" && !rememberedTarget) {
+  if (requestedRepo && !resyncMode && !tunnelListMode && !tunnelAllMode && mode !== "list" && !rememberedTarget) {
     throw new Error(`No remembered target found for repo "${requestedRepo}".`);
   }
 
@@ -1349,6 +1477,24 @@ async function main() {
     if (!hasFlag(args, "--dry-run")) {
       writeConfig(configPath, nextConfig);
     }
+    return;
+  }
+
+  if (resyncMode) {
+    const sshOpts =
+      argValue(args, "--ssh-opts") ??
+      process.env.SSH_OPTS ??
+      "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes";
+    await runResync({
+      args,
+      config: existingConfig,
+      configPath,
+      cwdRepoRoot: repoRoot,
+      cwdRepoName: basename(repoRoot),
+      requestedRepo,
+      sshOpts,
+      verbose: hasFlag(args, "--verbose") || hasFlag(args, "-v"),
+    });
     return;
   }
 

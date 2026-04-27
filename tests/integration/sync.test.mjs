@@ -74,6 +74,17 @@ function runSync(args) {
   );
 }
 
+function runResync(args, cwd) {
+  return spawnSync("bun", [path.join(repoRoot, "codebox.ts"), "--resync", ...args], {
+    cwd,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: tempHome,
+    },
+  });
+}
+
 try {
   const defaultManagedOpencode = runSync([]);
   assert.equal(
@@ -217,6 +228,137 @@ try {
     `${badFork.stdout}\n${badFork.stderr}`,
     /does not match required fork/,
   );
+
+  const resyncWorkspace = mkdtempSync(path.join(tempRepos, "resync-workspace-"));
+  const localCodeboxRepo = path.join(resyncWorkspace, "codebox");
+  const localDemoRepo = path.join(resyncWorkspace, "demo-repo");
+  const localFileRepo = path.join(resyncWorkspace, "file-repo");
+  mkdirSync(localCodeboxRepo, { recursive: true });
+  mkdirSync(localDemoRepo, { recursive: true });
+  writeFileSync(localFileRepo, "not a directory\n");
+  writeFileSync(path.join(localCodeboxRepo, "README.txt"), "codebox local repo\n");
+  writeFileSync(path.join(localDemoRepo, "README.txt"), "demo local repo\n");
+
+  const resyncConfigPath = path.join(tempRepos, "resync-codebox.json");
+  writeFileSync(
+    resyncConfigPath,
+    JSON.stringify(
+      {
+        known_targets: {
+          "cached-user@cached-host::$HOME/workspace::codebox": {
+            remote: "cached-user@cached-host",
+            sshOpts: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes",
+            base: "$HOME/workspace",
+            repo: "codebox",
+            remoteRepo: "$HOME/workspace/codebox",
+            opencodeLocalPort: 4096,
+            opencodeRemotePort: 4096,
+            updatedAt: "2026-03-29T00:00:00.000Z",
+          },
+          "other-user@other-host::$HOME/workspace::demo-repo": {
+            remote: "other-user@other-host",
+            sshOpts: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes",
+            base: "$HOME/workspace",
+            repo: "demo-repo",
+            remoteRepo: "$HOME/workspace/demo-repo",
+            opencodeLocalPort: 4097,
+            opencodeRemotePort: 4096,
+            updatedAt: "2026-03-29T00:00:01.000Z",
+          },
+          "missing-user@missing-host::$HOME/workspace::missing-repo": {
+            remote: "missing-user@missing-host",
+            sshOpts: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes",
+            base: "$HOME/workspace",
+            repo: "missing-repo",
+            remoteRepo: "$HOME/workspace/missing-repo",
+            opencodeLocalPort: 4098,
+            opencodeRemotePort: 4096,
+            updatedAt: "2026-03-29T00:00:02.000Z",
+          },
+          "file-user@file-host::$HOME/workspace::file-repo": {
+            remote: "file-user@file-host",
+            sshOpts: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes",
+            base: "$HOME/workspace",
+            repo: "file-repo",
+            remoteRepo: "$HOME/workspace/file-repo",
+            opencodeLocalPort: 4099,
+            opencodeRemotePort: 4096,
+            updatedAt: "2026-03-29T00:00:03.000Z",
+          },
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+
+  const resyncDryRun = runResync(
+    ["--config", resyncConfigPath, "--dry-run", "--no-repo"],
+    localCodeboxRepo,
+  );
+  assert.equal(
+    resyncDryRun.status,
+    0,
+    `--resync dry-run failed: ${resyncDryRun.stderr || resyncDryRun.stdout}`,
+  );
+  const resyncDryRunOut = `${resyncDryRun.stdout}\n${resyncDryRun.stderr}`;
+  assert.match(resyncDryRunOut, /Skipping other-user@other-host repo=demo-repo: --no-repo set/);
+  assert.match(resyncDryRunOut, /Skipping cached-user@cached-host repo=codebox: --no-repo set/);
+  assert.match(
+    resyncDryRunOut,
+    /Skipping missing-user@missing-host repo=missing-repo: no local path found/,
+  );
+  assert.match(
+    resyncDryRunOut,
+    /Skipping file-user@file-host repo=file-repo: local path is not a directory/,
+  );
+
+  const resyncRepoFiltered = runResync(
+    ["--config", resyncConfigPath, "--dry-run", "--repo", "demo-repo"],
+    localCodeboxRepo,
+  );
+  assert.equal(
+    resyncRepoFiltered.status,
+    0,
+    `--resync --repo dry-run failed: ${resyncRepoFiltered.stderr || resyncRepoFiltered.stdout}`,
+  );
+  const resyncRepoFilteredOut = `${resyncRepoFiltered.stdout}\n${resyncRepoFiltered.stderr}`;
+  assert.match(
+    resyncRepoFilteredOut,
+    /resync target remote=other-user@other-host repo=demo-repo local=.*\/demo-repo source=sibling/,
+  );
+  assert.match(
+    resyncRepoFilteredOut,
+    /sync repo: rsync .* other-user@other-host:\$HOME\/workspace\/demo-repo\//,
+  );
+  assert.match(resyncRepoFilteredOut, /sync repo: rsync .* -e ssh -i ~\/\.ssh\/id_rsa -o IdentitiesOnly=yes /);
+  assert.doesNotMatch(resyncRepoFilteredOut, /cached-user@cached-host/);
+
+  const resyncRepoFilteredCliSshOpts = runResync(
+    [
+      "--config",
+      resyncConfigPath,
+      "--dry-run",
+      "--repo",
+      "demo-repo",
+      "--ssh-opts",
+      "-o StrictHostKeyChecking=no",
+    ],
+    localCodeboxRepo,
+  );
+  assert.equal(
+    resyncRepoFilteredCliSshOpts.status,
+    0,
+    `--resync --repo --ssh-opts dry-run failed: ${
+      resyncRepoFilteredCliSshOpts.stderr || resyncRepoFilteredCliSshOpts.stdout
+    }`,
+  );
+  const resyncRepoFilteredCliSshOptsOut = `${resyncRepoFilteredCliSshOpts.stdout}\n${resyncRepoFilteredCliSshOpts.stderr}`;
+  assert.match(
+    resyncRepoFilteredCliSshOptsOut,
+    /sync repo: rsync .* -e ssh -o StrictHostKeyChecking=no .* other-user@other-host:\$HOME\/workspace\/demo-repo\//,
+  );
+  assert.doesNotMatch(resyncRepoFilteredCliSshOptsOut, /-i ~\/\.ssh\/id_rsa -o IdentitiesOnly=yes/);
 } finally {
   rmSync(tempHome, { recursive: true, force: true });
   rmSync(tempRepos, { recursive: true, force: true });
