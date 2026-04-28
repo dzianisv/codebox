@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -359,6 +359,82 @@ try {
     /sync repo: rsync .* -e ssh -o StrictHostKeyChecking=no .* other-user@other-host:\$HOME\/workspace\/demo-repo\//,
   );
   assert.doesNotMatch(resyncRepoFilteredCliSshOptsOut, /-i ~\/\.ssh\/id_rsa -o IdentitiesOnly=yes/);
+
+  const localRsyncSrcDir = mkdtempSync(path.join(tempRepos, "local-rsync-src-"));
+  const localRsyncDestDefaultDir = mkdtempSync(path.join(tempRepos, "local-rsync-dest-default-"));
+  const localRsyncDestNoGitDir = mkdtempSync(path.join(tempRepos, "local-rsync-dest-no-git-"));
+
+  mkdirSync(path.join(localRsyncSrcDir, ".git"), { recursive: true });
+  writeFileSync(path.join(localRsyncSrcDir, ".git", "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(path.join(localRsyncSrcDir, ".git", "config"), "[core]\n\trepositoryformatversion = 0\n");
+  writeFileSync(path.join(localRsyncSrcDir, "README.txt"), "local rsync payload\n");
+
+  const defaultRsyncArgs = [
+    "-az",
+    "--delete",
+    "--human-readable",
+    "--stats",
+    "--include",
+    ".git",
+    "--include",
+    ".git/**",
+    "--exclude",
+    "codex-rs/target*",
+    "--exclude",
+    "node_modules",
+    "--exclude",
+    "dist",
+    "--exclude",
+    ".venv",
+    `${localRsyncSrcDir}/`,
+    `${localRsyncDestDefaultDir}/`,
+  ];
+  const defaultRsyncResult = spawnSync("rsync", defaultRsyncArgs, { encoding: "utf8" });
+  assert.equal(
+    defaultRsyncResult.status,
+    0,
+    `Local default rsync failed: ${defaultRsyncResult.stderr || defaultRsyncResult.stdout}`,
+  );
+  assert.equal(
+    existsSync(path.join(localRsyncDestDefaultDir, ".git", "HEAD")),
+    true,
+    "Default rsync should transfer .git/HEAD",
+  );
+
+  const noGitRsyncArgs = [
+    "-az",
+    "--delete",
+    "--human-readable",
+    "--stats",
+    "--exclude",
+    "codex-rs/target*",
+    "--exclude",
+    "node_modules",
+    "--exclude",
+    "dist",
+    "--exclude",
+    ".venv",
+    "--exclude",
+    ".git",
+    `${localRsyncSrcDir}/`,
+    `${localRsyncDestNoGitDir}/`,
+  ];
+  const noGitRsyncResult = spawnSync("rsync", noGitRsyncArgs, { encoding: "utf8" });
+  assert.equal(
+    noGitRsyncResult.status,
+    0,
+    `Local --no-git rsync failed: ${noGitRsyncResult.stderr || noGitRsyncResult.stdout}`,
+  );
+  assert.equal(
+    existsSync(path.join(localRsyncDestNoGitDir, ".git")),
+    false,
+    "--no-git rsync should not transfer .git",
+  );
+  assert.equal(
+    existsSync(path.join(localRsyncDestNoGitDir, ".git", "HEAD")),
+    false,
+    "--no-git rsync should not transfer .git/HEAD",
+  );
 } finally {
   rmSync(tempHome, { recursive: true, force: true });
   rmSync(tempRepos, { recursive: true, force: true });
