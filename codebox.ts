@@ -39,6 +39,8 @@ type Options = {
   dryRun: boolean;
   configPath: string;
   syncPaperclip: boolean;
+  chromeCdpPort: number;
+  setupChromeCdp: boolean;
 };
 
 type CodeboxConfig = Record<string, unknown>;
@@ -104,6 +106,8 @@ Options:
   --sync-ssh                  Sync ~/.ssh (includes private keys) [off by default]
   --include-codex-history     Include ~/.codex/history.jsonl (default: excluded)
   --no-paperclip              Skip syncing ~/workspace/paperclip to the remote
+  --chrome-cdp-port <port>    CDP port for headless Chrome (default: 9222)
+  --no-chrome-cdp             Skip Chrome CDP service setup
   --no-env                    Do NOT sync env vars to the remote shell/OpenCode env
   --env <NAME>                Also sync a specific env var (repeatable)
   --env-prefix <PREFIX>       Sync env vars with this prefix (repeatable)
@@ -1592,6 +1596,8 @@ async function main() {
     dryRun: hasFlag(args, "--dry-run"),
     configPath,
     syncPaperclip: !hasFlag(args, "--no-paperclip"),
+    chromeCdpPort: parsePort(argValue(args, "--chrome-cdp-port"), "--chrome-cdp-port", 9222),
+    setupChromeCdp: !hasFlag(args, "--no-chrome-cdp"),
   };
 
   if (opts.syncSshKeys) {
@@ -1997,6 +2003,8 @@ OPENCODE_PORT=${bashQuote(String(opts.opencodeRemotePort))}
 OPENCODE_SUPERVISOR=${bashQuote(opts.opencodeSupervisor)}
 OPENCODE_REINSTALL=${bashQuote(opts.reinstallOpencode ? "1" : "0")}
 DISABLE_TAILSCALE=${bashQuote(opts.disableTailscale ? "1" : "0")}
+CHROME_CDP_PORT=${bashQuote(String(opts.chromeCdpPort))}
+SETUP_CHROME_CDP=${bashQuote(opts.setupChromeCdp ? "1" : "0")}
 OPENCODE_HOSTNAME="127.0.0.1"
 
 is_port_listening() {
@@ -2171,7 +2179,101 @@ install_paperclip() {
   (cd "$PAPERCLIP_DIR" && pnpm install) || echo "Warning: pnpm install failed in $PAPERCLIP_DIR"
 }
 
-install_opencode_local() {
+install_chrome() {
+  if command -v google-chrome-stable >/dev/null 2>&1 || command -v google-chrome >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+    echo "Info: Chrome/Chromium already installed"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "Warning: apt-get not found; cannot auto-install Chrome. Install it manually."
+    return 0
+  fi
+  echo "Info: Installing Google Chrome..."
+  local tmp_deb
+  tmp_deb="$(mktemp /tmp/chrome-XXXXXX.deb)"
+  if curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o "$tmp_deb"; then
+    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      sudo apt-get install -y "$tmp_deb" || sudo dpkg -i "$tmp_deb" && sudo apt-get install -yf
+    else
+      echo "Warning: sudo required to install Chrome via apt; skipping"
+    fi
+  fi
+  rm -f "$tmp_deb"
+}
+
+resolve_chrome_bin() {
+  for bin in google-chrome-stable google-chrome chromium-browser chromium; do
+    if command -v "$bin" >/dev/null 2>&1; then
+      command -v "$bin"
+      return 0
+    fi
+  done
+  # Fall back to puppeteer-bundled Chrome
+  if [ -d "$HOME/.cache/puppeteer/chrome" ]; then
+    local found
+    found="$(find "$HOME/.cache/puppeteer/chrome" -name "chrome" -type f -executable 2>/dev/null | sort -V | tail -1)"
+    if [ -n "$found" ]; then
+      echo "$found"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+write_chrome_cdp_service() {
+  local chrome_bin
+  if ! chrome_bin="$(resolve_chrome_bin)"; then
+    echo "Warning: Chrome binary not found; cannot write chrome-cdp.service"
+    return 1
+  fi
+  mkdir -p "$HOME/.config/systemd/user"
+  cat > "$HOME/.config/systemd/user/chrome-cdp.service" <<EOF
+[Unit]
+Description=Chrome CDP headless service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$chrome_bin \\
+  --headless=new \\
+  --no-sandbox \\
+  --disable-dev-shm-usage \\
+  --disable-gpu \\
+  --disable-software-rasterizer \\
+  --remote-debugging-port=$CHROME_CDP_PORT \\
+  --remote-debugging-address=127.0.0.1 \\
+  --user-data-dir=/tmp/chrome-cdp-profile \\
+  --disable-background-networking \\
+  --disable-default-apps \\
+  --no-first-run
+Restart=always
+RestartSec=5
+MemoryMax=2G
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
+EOF
+  echo "Info: wrote chrome-cdp.service (binary: $chrome_bin, port: $CHROME_CDP_PORT)"
+}
+
+start_chrome_cdp_systemd() {
+  if [ "$SETUP_CHROME_CDP" != "1" ]; then
+    return 0
+  fi
+  if ! systemd_user_available; then
+    echo "Warning: systemd user services unavailable; skipping Chrome CDP service setup"
+    return 0
+  fi
+  install_chrome
+  write_chrome_cdp_service || return 0
+  systemd_user_cmd daemon-reload
+  systemd_user_cmd enable chrome-cdp.service >/dev/null 2>&1 || true
+  # Restart only if the unit file changed (always restart to pick up new binary path)
+  systemd_user_cmd restart chrome-cdp.service >/dev/null 2>&1 || systemd_user_cmd start chrome-cdp.service >/dev/null 2>&1 || true
+  echo "Info: Chrome CDP service active on 127.0.0.1:$CHROME_CDP_PORT"
+}
   local attempted=0
   local runtime_stopped=0
 
@@ -2325,6 +2427,8 @@ if [ -d "$OPENCODE_DIR" ]; then
 fi
 
 install_paperclip
+
+start_chrome_cdp_systemd
 
 OPENCODE_BIN=""
 if OPENCODE_BIN="$(resolve_opencode_bin)"; then
