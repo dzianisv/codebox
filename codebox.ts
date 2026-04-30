@@ -38,6 +38,7 @@ type Options = {
   verbose: boolean;
   dryRun: boolean;
   configPath: string;
+  syncPaperclip: boolean;
 };
 
 type CodeboxConfig = Record<string, unknown>;
@@ -102,6 +103,7 @@ Options:
   --no-kube-config            Skip syncing ~/.kube
   --sync-ssh                  Sync ~/.ssh (includes private keys) [off by default]
   --include-codex-history     Include ~/.codex/history.jsonl (default: excluded)
+  --no-paperclip              Skip syncing ~/workspace/paperclip to the remote
   --no-env                    Do NOT sync env vars to the remote shell/OpenCode env
   --env <NAME>                Also sync a specific env var (repeatable)
   --env-prefix <PREFIX>       Sync env vars with this prefix (repeatable)
@@ -1589,6 +1591,7 @@ async function main() {
     verbose,
     dryRun: hasFlag(args, "--dry-run"),
     configPath,
+    syncPaperclip: !hasFlag(args, "--no-paperclip"),
   };
 
   if (opts.syncSshKeys) {
@@ -1755,6 +1758,20 @@ async function main() {
         `${opts.opencodeSrc!}/`,
         `${opts.remote}:${opts.base}/opencode/`,
         [".git", "node_modules", "dist", ".venv"],
+        opts.verbose,
+      ),
+    });
+  }
+
+  const paperclipLocalDir = resolve(os.homedir(), "workspace/paperclip");
+  if (opts.syncPaperclip && existsSync(paperclipLocalDir)) {
+    actions.push({
+      label: "sync paperclip",
+      cmd: rsyncCmd(
+        opts.sshOpts,
+        `${paperclipLocalDir}/`,
+        `${opts.remote}:${opts.base}/paperclip/`,
+        [".git", "node_modules", "dist", ".venv", ".next", "*.db"],
         opts.verbose,
       ),
     });
@@ -1972,6 +1989,7 @@ esac
 REPO_NAME=${bashQuote(repoName)}
 REPO_DIR="$REMOTE_BASE/$REPO_NAME"
 OPENCODE_DIR="$REMOTE_BASE/opencode"
+PAPERCLIP_DIR="$REMOTE_BASE/paperclip"
 OPENCODE_REPO_URL=${bashQuote(opts.opencodeRepoUrl)}
 OPENCODE_REF=${bashQuote(opts.opencodeRef)}
 OPENCODE_SYNC_LOCAL_SOURCE=${bashQuote(syncLocalOpencodeRepo ? "1" : "0")}
@@ -2140,6 +2158,19 @@ stop_opencode_runtime() {
   echo "Warning: timed out waiting for OpenCode to stop on $OPENCODE_HOSTNAME:$OPENCODE_PORT"
 }
 
+install_paperclip() {
+  if [ ! -d "$PAPERCLIP_DIR" ]; then
+    echo "Info: paperclip directory not found at $PAPERCLIP_DIR; skipping"
+    return 0
+  fi
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "Info: pnpm not found; installing via npm..."
+    npm install -g pnpm || { echo "Warning: failed to install pnpm; skipping paperclip install"; return 0; }
+  fi
+  echo "Info: Running pnpm install in $PAPERCLIP_DIR"
+  (cd "$PAPERCLIP_DIR" && pnpm install) || echo "Warning: pnpm install failed in $PAPERCLIP_DIR"
+}
+
 install_opencode_local() {
   local attempted=0
   local runtime_stopped=0
@@ -2261,7 +2292,7 @@ ${envSetup}if ! command -v devbox >/dev/null 2>&1; then
   curl -fsSL https://get.jetpack.io/devbox | bash -s -- -f
 fi
 
-mkdir -p "$REPO_DIR" "$OPENCODE_DIR" ~/.config/opencode ~/.opencode ~/.codex ~/.config/gh ~/.local/bin ~/.local/share/opencode
+mkdir -p "$REPO_DIR" "$OPENCODE_DIR" "$REMOTE_BASE/paperclip" ~/.config/opencode ~/.opencode ~/.codex ~/.config/gh ~/.local/bin ~/.local/share/opencode
 
 ensure_opencode_checkout
 cat > "$REPO_DIR/devbox.json" <<'EOF'
@@ -2292,6 +2323,8 @@ if [ -d "$OPENCODE_DIR" ]; then
     echo "Warning: OpenCode local install failed; continuing bootstrap."
   fi
 fi
+
+install_paperclip
 
 OPENCODE_BIN=""
 if OPENCODE_BIN="$(resolve_opencode_bin)"; then
