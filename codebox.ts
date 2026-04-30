@@ -6,6 +6,7 @@ import os from "node:os";
 type OpencodeSupervisor = "auto" | "nohup" | "systemd";
 const DEFAULT_BASE = "$HOME/workspace";
 const DEFAULT_OPENCODE_REPO_URL = "https://github.com/dzianisv/opencode.git";
+const DEFAULT_PAPERCLIP_REPO_URL = "https://github.com/dzianisv/paperclip.git";
 const DEFAULT_OPENCODE_REF = "dev";
 const DEFAULT_OPENCODE_SUPERVISOR: OpencodeSupervisor = "systemd";
 
@@ -39,6 +40,7 @@ type Options = {
   dryRun: boolean;
   configPath: string;
   syncPaperclip: boolean;
+  paperclipRepoUrl: string;
   chromeCdpPort: number;
   setupChromeCdp: boolean;
 };
@@ -106,6 +108,7 @@ Options:
   --sync-ssh                  Sync ~/.ssh (includes private keys) [off by default]
   --include-codex-history     Include ~/.codex/history.jsonl (default: excluded)
   --no-paperclip              Skip syncing ~/workspace/paperclip to the remote
+  --paperclip-repo-url <url>  Paperclip git remote to clone on the target (default: "${DEFAULT_PAPERCLIP_REPO_URL}")
   --chrome-cdp-port <port>    CDP port for headless Chrome (default: 9222)
   --no-chrome-cdp             Skip Chrome CDP service setup
   --no-env                    Do NOT sync env vars to the remote shell/OpenCode env
@@ -1596,6 +1599,11 @@ async function main() {
     dryRun: hasFlag(args, "--dry-run"),
     configPath,
     syncPaperclip: !hasFlag(args, "--no-paperclip"),
+    paperclipRepoUrl: parseNonEmptyOption(
+      argValue(args, "--paperclip-repo-url") ?? process.env.PAPERCLIP_REPO_URL,
+      "--paperclip-repo-url",
+      DEFAULT_PAPERCLIP_REPO_URL,
+    ),
     chromeCdpPort: parsePort(argValue(args, "--chrome-cdp-port"), "--chrome-cdp-port", 9222),
     setupChromeCdp: !hasFlag(args, "--no-chrome-cdp"),
   };
@@ -1996,6 +2004,7 @@ REPO_NAME=${bashQuote(repoName)}
 REPO_DIR="$REMOTE_BASE/$REPO_NAME"
 OPENCODE_DIR="$REMOTE_BASE/opencode"
 PAPERCLIP_DIR="$REMOTE_BASE/paperclip"
+PAPERCLIP_REPO_URL=${bashQuote(opts.paperclipRepoUrl)}
 OPENCODE_REPO_URL=${bashQuote(opts.opencodeRepoUrl)}
 OPENCODE_REF=${bashQuote(opts.opencodeRef)}
 OPENCODE_SYNC_LOCAL_SOURCE=${bashQuote(syncLocalOpencodeRepo ? "1" : "0")}
@@ -2166,9 +2175,25 @@ stop_opencode_runtime() {
   echo "Warning: timed out waiting for OpenCode to stop on $OPENCODE_HOSTNAME:$OPENCODE_PORT"
 }
 
+ensure_paperclip_checkout() {
+  if [ ! -d "$PAPERCLIP_DIR/.git" ]; then
+    if [ -d "$PAPERCLIP_DIR" ]; then
+      echo "Info: $PAPERCLIP_DIR exists but is not a git repo (rsynced); skipping git setup"
+    else
+      echo "Info: Cloning paperclip from $PAPERCLIP_REPO_URL into $PAPERCLIP_DIR"
+      git clone "$PAPERCLIP_REPO_URL" "$PAPERCLIP_DIR" || { echo "Warning: failed to clone paperclip; skipping"; return 0; }
+    fi
+  else
+    git -C "$PAPERCLIP_DIR" remote set-url origin "$PAPERCLIP_REPO_URL" 2>/dev/null || \
+      git -C "$PAPERCLIP_DIR" remote add origin "$PAPERCLIP_REPO_URL"
+    echo "Info: paperclip checkout at $PAPERCLIP_DIR anchored to $PAPERCLIP_REPO_URL"
+  fi
+}
+
 install_paperclip() {
+  ensure_paperclip_checkout
   if [ ! -d "$PAPERCLIP_DIR" ]; then
-    echo "Info: paperclip directory not found at $PAPERCLIP_DIR; skipping"
+    echo "Warning: paperclip directory not found after checkout; skipping install"
     return 0
   fi
   if ! command -v pnpm >/dev/null 2>&1; then
