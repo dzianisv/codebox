@@ -650,6 +650,7 @@ function findPositionalRemote(args: string[]): string | undefined {
     "--opencode-local-port",
     "--opencode-remote-port",
     "--opencode-supervisor",
+    "--paperclip-repo-url",
     "--config",
     "--env",
     "--env-prefix",
@@ -690,6 +691,7 @@ function parseSshModeArgs(rawArgs: string[]): ParsedSshModeArgs {
     "--opencode-local-port",
     "--opencode-remote-port",
     "--opencode-supervisor",
+    "--paperclip-repo-url",
     "--config",
     "--env",
     "--env-prefix",
@@ -2419,7 +2421,7 @@ ${envSetup}if ! command -v devbox >/dev/null 2>&1; then
   curl -fsSL https://get.jetpack.io/devbox | bash -s -- -f
 fi
 
-mkdir -p "$REPO_DIR" "$OPENCODE_DIR" "$REMOTE_BASE/paperclip" ~/.config/opencode ~/.opencode ~/.codex ~/.config/gh ~/.local/bin ~/.local/share/opencode
+mkdir -p "$REPO_DIR" "$OPENCODE_DIR" ~/.config/opencode ~/.opencode ~/.codex ~/.config/gh ~/.local/bin ~/.local/share/opencode
 
 ensure_opencode_checkout
 cat > "$REPO_DIR/devbox.json" <<'EOF'
