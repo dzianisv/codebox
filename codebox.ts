@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 import { basename, resolve } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 
 type OpencodeSupervisor = "auto" | "nohup" | "systemd";
 const DEFAULT_BASE = "$HOME/workspace";
 const DEFAULT_OPENCODE_REPO_URL = "https://github.com/dzianisv/opencode.git";
+const DEFAULT_PAPERCLIP_REPO_URL = "https://github.com/dzianisv/paperclip.git";
 const DEFAULT_OPENCODE_REF = "dev";
 const DEFAULT_OPENCODE_SUPERVISOR: OpencodeSupervisor = "systemd";
 
@@ -27,6 +28,7 @@ type Options = {
   syncOpencodeConfig: boolean;
   syncOpencodeAuth: boolean;
   syncGhConfig: boolean;
+  syncKubeConfig: boolean;
   syncSshKeys: boolean;
   includeCodexHistory: boolean;
   syncEnv: boolean;
@@ -37,6 +39,10 @@ type Options = {
   verbose: boolean;
   dryRun: boolean;
   configPath: string;
+  syncPaperclip: boolean;
+  paperclipRepoUrl: string;
+  chromeCdpPort: number;
+  setupChromeCdp: boolean;
 };
 
 type CodeboxConfig = Record<string, unknown>;
@@ -44,6 +50,8 @@ type CodeboxConfig = Record<string, unknown>;
 type KnownTarget = {
   remote: string;
   remoteHost?: string;
+  tailscaleIp?: string;
+  publicIp?: string;
   sshOpts?: string;
   base: string;
   repo: string;
@@ -70,21 +78,23 @@ function usage(): string {
   return `Usage:
   ./codebox.ts [--remote <user@host>] [options]
   ./codebox.ts ssh [<user@host>] [options] [ssh-options] [-- <remote command...>]
+  ./codebox.ts list [--repo <name>]                List all remembered VM targets
   ./codebox.ts tunnel [<user@host>] [options]
 
 Options:
   --remote <user@host>        SSH target (default: recent remembered target)
   --ssh-opts <string>         SSH options (default: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes")
   --base <path>               Remote base dir (default: "${DEFAULT_BASE}")
-  --repo <name>               Tunnel mode only: remembered repo to target instead of current working directory
+  --repo <name>               Tunnel/list/resync filter: remembered repo to target
+  --resync                    Sync mode only: re-sync all remembered targets (optionally filtered by --repo)
   --opencode-src <path>       Optional local opencode repo path to sync instead of managed remote checkout
   --opencode-repo-url <url>   OpenCode git remote to anchor on the target (default: "${DEFAULT_OPENCODE_REPO_URL}")
   --opencode-ref <branch|sha> OpenCode branch or commit for the managed remote checkout (default: "${DEFAULT_OPENCODE_REF}")
   --exclude <pattern>         Extra repo rsync exclude pattern (repeatable)
   --no-opencode-tunnel        Skip auto-starting localhost SSH tunnel to remote OpenCode
   --disable-tailscale         Skip Tailscale setup; OpenCode serves on 127.0.0.1 only
-  --opencode-local-port <n>   Local forwarded port (default: 5551)
-  --opencode-remote-port <n>  Remote OpenCode port (default: 5551)
+  --opencode-local-port <n>   Local forwarded port (default: 4096)
+  --opencode-remote-port <n>  Remote OpenCode port (default: 4096)
   --opencode-supervisor <m>   Remote OpenCode supervisor: auto|nohup|systemd (default: ${DEFAULT_OPENCODE_SUPERVISOR})
   --list                      Tunnel mode only: show remembered tunnel targets
   --all                       Tunnel mode only: start/reconcile all remembered tunnel targets
@@ -94,8 +104,13 @@ Options:
   --no-opencode-config        Skip syncing ~/.config/opencode and ~/.opencode
   --no-opencode-auth          Skip syncing ~/.local/share/opencode auth state
   --no-gh-config              Skip syncing ~/.config/gh
+  --no-kube-config            Skip syncing ~/.kube
   --sync-ssh                  Sync ~/.ssh (includes private keys) [off by default]
   --include-codex-history     Include ~/.codex/history.jsonl (default: excluded)
+  --no-paperclip              Skip syncing ~/workspace/paperclip to the remote
+  --paperclip-repo-url <url>  Paperclip git remote to clone on the target (default: "${DEFAULT_PAPERCLIP_REPO_URL}")
+  --chrome-cdp-port <port>    CDP port for headless Chrome (default: 9222)
+  --no-chrome-cdp             Skip Chrome CDP service setup
   --no-env                    Do NOT sync env vars to the remote shell/OpenCode env
   --env <NAME>                Also sync a specific env var (repeatable)
   --env-prefix <PREFIX>       Sync env vars with this prefix (repeatable)
@@ -118,6 +133,8 @@ Example:
   ./codebox.ts tunnel --repo termux-app
   ./codebox.ts tunnel --list
   ./codebox.ts tunnel --all
+  ./codebox.ts --resync
+  ./codebox.ts --resync --repo termux-app --dry-run
   ./codebox.ts ssh --remote azureuser@dev-1 -- git status -sb
 `;
 }
@@ -211,6 +228,8 @@ function parseKnownTarget(value: unknown): KnownTarget | undefined {
   return {
     remote,
     remoteHost: typeof value.remoteHost === "string" ? value.remoteHost : undefined,
+    tailscaleIp: typeof value.tailscaleIp === "string" ? value.tailscaleIp : undefined,
+    publicIp: typeof value.publicIp === "string" ? value.publicIp : undefined,
     sshOpts: typeof value.sshOpts === "string" ? value.sshOpts : undefined,
     base,
     repo,
@@ -631,6 +650,7 @@ function findPositionalRemote(args: string[]): string | undefined {
     "--opencode-local-port",
     "--opencode-remote-port",
     "--opencode-supervisor",
+    "--paperclip-repo-url",
     "--config",
     "--env",
     "--env-prefix",
@@ -671,6 +691,7 @@ function parseSshModeArgs(rawArgs: string[]): ParsedSshModeArgs {
     "--opencode-local-port",
     "--opencode-remote-port",
     "--opencode-supervisor",
+    "--paperclip-repo-url",
     "--config",
     "--env",
     "--env-prefix",
@@ -1024,6 +1045,36 @@ async function readRemoteHostname(
   return hostname || undefined;
 }
 
+async function readRemoteTailscaleIp(
+  remote: string,
+  sshOpts: string,
+): Promise<string | undefined> {
+  const sshArgs = shellSplit(sshOpts).map(expandTildeArg);
+  const result = await runCapture(["ssh", ...sshArgs, remote, "tailscale", "ip", "-4"]);
+  if (result.code !== 0) return undefined;
+  const ip = result.stdout.trim().split(/\s+/)[0];
+  return ip || undefined;
+}
+
+async function readRemotePublicIp(
+  remote: string,
+  sshOpts: string,
+): Promise<string | undefined> {
+  const sshArgs = shellSplit(sshOpts).map(expandTildeArg);
+  // Try hostname -I first (gets all IPs, first one is usually public), fall back to curl
+  let result = await runCapture([
+    "ssh",
+    ...sshArgs,
+    remote,
+    "bash",
+    "-c",
+    "curl -sf --max-time 3 https://ifconfig.me || curl -sf --max-time 3 https://api.ipify.org || hostname -I | awk '{print $1}'",
+  ]);
+  if (result.code !== 0) return undefined;
+  const ip = result.stdout.trim().split(/\s+/)[0];
+  return ip || undefined;
+}
+
 function formatKnownTargetLine(params: {
   target: KnownTarget;
   status: "active" | "inactive" | "occupied";
@@ -1085,6 +1136,8 @@ function rsyncCmd(
   dest: string,
   excludes: string[] = [],
   verbose = false,
+  includes: string[] = [],
+  userExcludes: string[] = [],
 ) {
   const cmd = [
     "rsync",
@@ -1097,6 +1150,18 @@ function rsyncCmd(
     cmd.push("-v", "--progress");
   }
   cmd.push("-e", `ssh ${sshOpts}`);
+  // rsync uses first-match-wins, so ordering matters:
+  //  1. User-provided excludes — explicit user intent always takes priority
+  //     (e.g. --exclude .git/config must not be overridden by an include).
+  //  2. Protective includes — guard paths like .git from built-in excludes
+  //     and system-level filters.
+  //  3. Built-in excludes — heavy dirs (node_modules, dist, …).
+  for (const ex of userExcludes) {
+    cmd.push("--exclude", ex);
+  }
+  for (const inc of includes) {
+    cmd.push("--include", inc);
+  }
   for (const ex of excludes) {
     cmd.push("--exclude", ex);
   }
@@ -1104,10 +1169,134 @@ function rsyncCmd(
   return cmd;
 }
 
+function resolveResyncLocalRepoPath(params: {
+  cwdRepoRoot: string;
+  cwdRepoName: string;
+  targetRepo: string;
+}): { path: string; source: "cwd" | "sibling"; attempted?: string } | undefined {
+  if (params.targetRepo === params.cwdRepoName) {
+    return { path: params.cwdRepoRoot, source: "cwd" };
+  }
+
+  const siblingPath = resolve(params.cwdRepoRoot, "..", params.targetRepo);
+  if (existsSync(siblingPath)) {
+    try {
+      if (statSync(siblingPath).isDirectory()) {
+        return { path: siblingPath, source: "sibling" };
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  return { path: siblingPath, source: "sibling", attempted: siblingPath };
+}
+
+async function runResync(params: {
+  args: string[];
+  config: CodeboxConfig;
+  configPath: string;
+  cwdRepoRoot: string;
+  cwdRepoName: string;
+  requestedRepo?: string;
+  sshOpts: string;
+  verbose: boolean;
+}): Promise<void> {
+  const targets = selectKnownTargets(params.config, { repo: params.requestedRepo });
+  if (targets.length === 0) {
+    const scope = params.requestedRepo ? ` for repo "${params.requestedRepo}"` : "";
+    console.log(`[codebox] No remembered targets to resync${scope}.`);
+    return;
+  }
+
+  const syncRepo = !hasFlag(params.args, "--no-repo");
+  const syncGit = !hasFlag(params.args, "--no-git");
+  const dryRun = hasFlag(params.args, "--dry-run");
+  const repoExcludes = argValues(params.args, "--exclude");
+  const builtinExcludes = [
+    "codex-rs/target*",
+    "node_modules",
+    "dist",
+    ".venv",
+  ];
+  const repoIncludes = syncGit ? [".git", ".git/**"] : [];
+  const repoExcludesWithBuiltin = syncGit ? builtinExcludes : [".git", ...builtinExcludes];
+
+  let nextConfig = params.config;
+  for (const target of targets) {
+    const localRepo = resolveResyncLocalRepoPath({
+      cwdRepoRoot: params.cwdRepoRoot,
+      cwdRepoName: params.cwdRepoName,
+      targetRepo: target.repo,
+    });
+    if (!localRepo || !existsSync(localRepo.path)) {
+      const attemptedPath = localRepo?.attempted ?? resolve(params.cwdRepoRoot, "..", target.repo);
+      console.log(
+        `[codebox] Skipping ${target.remote} repo=${target.repo}: no local path found at ${attemptedPath}`,
+      );
+      continue;
+    }
+    try {
+      if (!statSync(localRepo.path).isDirectory()) {
+        console.log(
+          `[codebox] Skipping ${target.remote} repo=${target.repo}: local path is not a directory at ${localRepo.path}`,
+        );
+        continue;
+      }
+    } catch {
+      console.log(
+        `[codebox] Skipping ${target.remote} repo=${target.repo}: no local path found at ${localRepo.path}`,
+      );
+      continue;
+    }
+
+    if (!syncRepo) {
+      console.log(`[codebox] Skipping ${target.remote} repo=${target.repo}: --no-repo set`);
+      continue;
+    }
+
+    const cliSshOpts = argValue(params.args, "--ssh-opts");
+    const targetSshOpts = cliSshOpts ?? target.sshOpts ?? params.sshOpts;
+    const cmd = rsyncCmd(
+      targetSshOpts,
+      `${localRepo.path}/`,
+      `${target.remote}:${target.remoteRepo}/`,
+      repoExcludesWithBuiltin,
+      params.verbose,
+      repoIncludes,
+      repoExcludes,
+    );
+    if (dryRun) {
+      console.log(
+        `[dry-run] resync target remote=${target.remote} repo=${target.repo} local=${localRepo.path} source=${localRepo.source}`,
+      );
+      console.log(`[dry-run] sync repo: ${cmd.join(" ")}`);
+      continue;
+    }
+
+    const sshArgs = shellSplit(targetSshOpts).map(expandTildeArg);
+    await run(["ssh", ...sshArgs, target.remote, "mkdir", "-p", target.remoteRepo]);
+    await run(cmd);
+    const updatedAt = new Date().toISOString();
+    nextConfig = upsertKnownTarget(
+      nextConfig,
+      {
+        ...target,
+        sshOpts: targetSshOpts,
+        lastSyncedAt: updatedAt,
+      },
+      updatedAt,
+    );
+  }
+
+  if (!dryRun) {
+    writeConfig(params.configPath, nextConfig);
+  }
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
-  const mode = rawArgs[0] === "ssh" ? "ssh" : rawArgs[0] === "tunnel" ? "tunnel" : "sync";
-  let args = (mode === "ssh" || mode === "tunnel") ? rawArgs.slice(1) : rawArgs;
+  const mode = rawArgs[0] === "ssh" ? "ssh" : rawArgs[0] === "tunnel" ? "tunnel" : rawArgs[0] === "list" ? "list" : "sync";
+  let args = (mode === "ssh" || mode === "tunnel" || mode === "list") ? rawArgs.slice(1) : rawArgs;
   let sshExecArgs: string[] = [];
   let sshPassthroughArgs: string[] = [];
   let positionalRemote: string | undefined = findPositionalRemote(args);
@@ -1131,7 +1320,8 @@ async function main() {
   const existingConfig = readConfig(configPath);
   const tunnelListMode = mode === "tunnel" && hasFlag(args, "--list");
   const tunnelAllMode = mode === "tunnel" && hasFlag(args, "--all");
-  const requestedRepo = mode === "tunnel" ? argValue(args, "--repo") : undefined;
+  const resyncMode = mode === "sync" && hasFlag(args, "--resync");
+  const requestedRepo = (mode === "tunnel" || mode === "list" || resyncMode) ? argValue(args, "--repo") : undefined;
   if (tunnelListMode && tunnelAllMode) {
     throw new Error("Cannot combine --list and --all in tunnel mode.");
   }
@@ -1142,7 +1332,7 @@ async function main() {
   const requestedRemoteHint =
     argValue(args, "--remote") ?? positionalRemote ?? process.env.REMOTE;
   const rememberedTarget =
-    !tunnelListMode && !tunnelAllMode
+    !resyncMode && !tunnelListMode && !tunnelAllMode && mode !== "list"
       ? await resolveRememberedTarget({
           config: existingConfig,
           repo: repoName,
@@ -1151,7 +1341,7 @@ async function main() {
           requireRepoMatch: Boolean(requestedRepo),
         })
       : undefined;
-  if (requestedRepo && !tunnelListMode && !tunnelAllMode && !rememberedTarget) {
+  if (requestedRepo && !resyncMode && !tunnelListMode && !tunnelAllMode && mode !== "list" && !rememberedTarget) {
     throw new Error(`No remembered target found for repo "${requestedRepo}".`);
   }
 
@@ -1190,6 +1380,39 @@ async function main() {
     }
     for (const line of lines) {
       console.log(line);
+    }
+    return;
+  }
+
+  if (mode === "list") {
+    const listedConfig = requestedRepo
+      ? {
+          ...existingConfig,
+          known_targets: Object.fromEntries(
+            getKnownTargetEntries(existingConfig).filter(([, target]) => target.repo === requestedRepo),
+          ),
+        }
+      : existingConfig;
+    const targets = getKnownTargetEntries(listedConfig)
+      .map(([, target]) => target)
+      .sort((left, right) => {
+        const a = knownTargetActivityStamp(left);
+        const b = knownTargetActivityStamp(right);
+        return b.localeCompare(a);
+      });
+    if (targets.length === 0) {
+      console.log("[codebox] No remembered targets.");
+      return;
+    }
+    for (const target of targets) {
+      const vmName = target.remoteHost ?? target.remote;
+      const publicIp = target.publicIp ?? "-";
+      const tailscaleIp = target.tailscaleIp;
+      const remotePort = target.opencodeRemotePort;
+      const endpoint = tailscaleIp
+        ? `http://${tailscaleIp}:${remotePort}`
+        : `http://127.0.0.1:${remotePort}`;
+      console.log(`${vmName}\t${publicIp}\t${endpoint}`);
     }
     return;
   }
@@ -1268,6 +1491,24 @@ async function main() {
     return;
   }
 
+  if (resyncMode) {
+    const sshOpts =
+      argValue(args, "--ssh-opts") ??
+      process.env.SSH_OPTS ??
+      "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes";
+    await runResync({
+      args,
+      config: existingConfig,
+      configPath,
+      cwdRepoRoot: repoRoot,
+      cwdRepoName: basename(repoRoot),
+      requestedRepo,
+      sshOpts,
+      verbose: hasFlag(args, "--verbose") || hasFlag(args, "-v"),
+    });
+    return;
+  }
+
   const remote =
     requestedRemoteHint ??
     rememberedTarget?.remote ??
@@ -1296,12 +1537,12 @@ async function main() {
   const parsedOpencodeLocalPort = parsePort(
     opencodeLocalPortRaw,
     "--opencode-local-port",
-    5551,
+    4096,
   );
   const opencodeRemotePort = parsePort(
     argValue(args, "--opencode-remote-port") ?? process.env.OPENCODE_REMOTE_PORT,
     "--opencode-remote-port",
-    5551,
+    4096,
   );
   const opencodeSupervisor = parseOpencodeSupervisor(
     argValue(args, "--opencode-supervisor") ?? process.env.OPENCODE_SUPERVISOR,
@@ -1348,6 +1589,7 @@ async function main() {
     syncOpencodeConfig,
     syncOpencodeAuth,
     syncGhConfig: !hasFlag(args, "--no-gh-config"),
+    syncKubeConfig: !hasFlag(args, "--no-kube-config"),
     syncSshKeys: hasFlag(args, "--sync-ssh"),
     includeCodexHistory: hasFlag(args, "--include-codex-history"),
     syncEnv: !hasFlag(args, "--no-env"),
@@ -1358,6 +1600,14 @@ async function main() {
     verbose,
     dryRun: hasFlag(args, "--dry-run"),
     configPath,
+    syncPaperclip: !hasFlag(args, "--no-paperclip"),
+    paperclipRepoUrl: parseNonEmptyOption(
+      argValue(args, "--paperclip-repo-url") ?? process.env.PAPERCLIP_REPO_URL,
+      "--paperclip-repo-url",
+      DEFAULT_PAPERCLIP_REPO_URL,
+    ),
+    chromeCdpPort: parsePort(argValue(args, "--chrome-cdp-port"), "--chrome-cdp-port", 9222),
+    setupChromeCdp: !hasFlag(args, "--no-chrome-cdp"),
   };
 
   if (opts.syncSshKeys) {
@@ -1481,15 +1731,22 @@ async function main() {
     return;
   }
 
-  const repoExcludes = [
+  const builtinExcludes = [
     "codex-rs/target*",
     "node_modules",
     "dist",
     ".venv",
-    ...opts.repoExcludes,
   ];
-  if (!opts.syncGit) {
-    repoExcludes.unshift(".git");
+  // Explicit --include rules for .git so rsync's first-match-wins logic
+  // keeps the directory even when a system-level filter or built-in exclude
+  // would otherwise drop it.  User-provided excludes (opts.repoExcludes)
+  // are emitted first so they can still override the includes when the
+  // user explicitly targets paths under .git (e.g. --exclude .git/config).
+  const repoIncludes: string[] = [];
+  if (opts.syncGit) {
+    repoIncludes.push(".git", ".git/**");
+  } else {
+    builtinExcludes.unshift(".git");
   }
 
   const actions: Array<{ label: string; cmd: string[]; stdin?: string }> = [];
@@ -1501,8 +1758,10 @@ async function main() {
         opts.sshOpts,
         `${repoRoot}/`,
         `${opts.remote}:${remoteRepo}/`,
-        repoExcludes,
+        builtinExcludes,
         opts.verbose,
+        repoIncludes,
+        opts.repoExcludes,
       ),
     });
   }
@@ -1515,6 +1774,20 @@ async function main() {
         `${opts.opencodeSrc!}/`,
         `${opts.remote}:${opts.base}/opencode/`,
         [".git", "node_modules", "dist", ".venv"],
+        opts.verbose,
+      ),
+    });
+  }
+
+  const paperclipLocalDir = resolve(os.homedir(), "workspace/paperclip");
+  if (opts.syncPaperclip && existsSync(paperclipLocalDir)) {
+    actions.push({
+      label: "sync paperclip",
+      cmd: rsyncCmd(
+        opts.sshOpts,
+        `${paperclipLocalDir}/`,
+        `${opts.remote}:${opts.base}/paperclip/`,
+        [".git", "node_modules", "dist", ".venv", ".next", "*.db"],
         opts.verbose,
       ),
     });
@@ -1581,6 +1854,40 @@ async function main() {
         });
       }
     }
+
+    // Sync opencode agents/skills/commands customizations
+    for (const entry of ["agents", "skills", "AGENTS.md", "commands"] as const) {
+      const source = resolve(opencodeConfig, entry);
+      if (!existsSync(source)) continue;
+      const isDir = statSync(source).isDirectory();
+      actions.push({
+        label: `sync ~/.config/opencode/${entry}`,
+        cmd: rsyncCmd(
+          opts.sshOpts,
+          isDir ? `${source}/` : source,
+          isDir
+            ? `${opts.remote}:~/.config/opencode/${entry}/`
+            : `${opts.remote}:~/.config/opencode/${entry}`,
+          [],
+          opts.verbose,
+        ),
+      });
+    }
+
+    // Sync ~/.agents/ (global agent skills/memory)
+    const agentsHome = resolve(os.homedir(), ".agents");
+    if (existsSync(agentsHome)) {
+      actions.push({
+        label: "sync ~/.agents",
+        cmd: rsyncCmd(
+          opts.sshOpts,
+          `${agentsHome}/`,
+          `${opts.remote}:~/.agents/`,
+          [],
+          opts.verbose,
+        ),
+      });
+    }
   }
 
   if (opts.syncGhConfig) {
@@ -1592,6 +1899,22 @@ async function main() {
           opts.sshOpts,
           `${ghConfig}/`,
           `${opts.remote}:~/.config/gh/`,
+          [],
+          opts.verbose,
+        ),
+      });
+    }
+  }
+
+  if (opts.syncKubeConfig) {
+    const kubeDir = resolve(os.homedir(), ".kube");
+    if (existsSync(kubeDir)) {
+      actions.push({
+        label: "sync ~/.kube",
+        cmd: rsyncCmd(
+          opts.sshOpts,
+          `${kubeDir}/`,
+          `${opts.remote}:~/.kube/`,
           [],
           opts.verbose,
         ),
@@ -1628,7 +1951,7 @@ async function main() {
   "packages": ["git","rustc","cargo","pkg-config","openssl","libcap","gcc","bun"]
 }\n`;
   const devboxOpencodeJson = `{
-  "packages": ["git","bun"]
+  "packages": ["git","bun","nodejs_22"]
 }\n`;
 
   const envLines = Object.entries(opts.envVars)
@@ -1682,6 +2005,8 @@ esac
 REPO_NAME=${bashQuote(repoName)}
 REPO_DIR="$REMOTE_BASE/$REPO_NAME"
 OPENCODE_DIR="$REMOTE_BASE/opencode"
+PAPERCLIP_DIR="$REMOTE_BASE/paperclip"
+PAPERCLIP_REPO_URL=${bashQuote(opts.paperclipRepoUrl)}
 OPENCODE_REPO_URL=${bashQuote(opts.opencodeRepoUrl)}
 OPENCODE_REF=${bashQuote(opts.opencodeRef)}
 OPENCODE_SYNC_LOCAL_SOURCE=${bashQuote(syncLocalOpencodeRepo ? "1" : "0")}
@@ -1689,6 +2014,8 @@ OPENCODE_PORT=${bashQuote(String(opts.opencodeRemotePort))}
 OPENCODE_SUPERVISOR=${bashQuote(opts.opencodeSupervisor)}
 OPENCODE_REINSTALL=${bashQuote(opts.reinstallOpencode ? "1" : "0")}
 DISABLE_TAILSCALE=${bashQuote(opts.disableTailscale ? "1" : "0")}
+CHROME_CDP_PORT=${bashQuote(String(opts.chromeCdpPort))}
+SETUP_CHROME_CDP=${bashQuote(opts.setupChromeCdp ? "1" : "0")}
 OPENCODE_HOSTNAME="127.0.0.1"
 
 is_port_listening() {
@@ -1850,7 +2177,130 @@ stop_opencode_runtime() {
   echo "Warning: timed out waiting for OpenCode to stop on $OPENCODE_HOSTNAME:$OPENCODE_PORT"
 }
 
-install_opencode_local() {
+ensure_paperclip_checkout() {
+  if [ ! -d "$PAPERCLIP_DIR/.git" ]; then
+    if [ -d "$PAPERCLIP_DIR" ]; then
+      echo "Info: $PAPERCLIP_DIR exists but is not a git repo (rsynced); skipping git setup"
+    else
+      echo "Info: Cloning paperclip from $PAPERCLIP_REPO_URL into $PAPERCLIP_DIR"
+      git clone "$PAPERCLIP_REPO_URL" "$PAPERCLIP_DIR" || { echo "Warning: failed to clone paperclip; skipping"; return 0; }
+    fi
+  else
+    git -C "$PAPERCLIP_DIR" remote set-url origin "$PAPERCLIP_REPO_URL" 2>/dev/null || \
+      git -C "$PAPERCLIP_DIR" remote add origin "$PAPERCLIP_REPO_URL"
+    echo "Info: paperclip checkout at $PAPERCLIP_DIR anchored to $PAPERCLIP_REPO_URL"
+  fi
+}
+
+install_paperclip() {
+  ensure_paperclip_checkout
+  if [ ! -d "$PAPERCLIP_DIR" ]; then
+    echo "Warning: paperclip directory not found after checkout; skipping install"
+    return 0
+  fi
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "Info: pnpm not found; installing via npm..."
+    npm install -g pnpm || { echo "Warning: failed to install pnpm; skipping paperclip install"; return 0; }
+  fi
+  echo "Info: Running pnpm install in $PAPERCLIP_DIR"
+  (cd "$PAPERCLIP_DIR" && pnpm install) || echo "Warning: pnpm install failed in $PAPERCLIP_DIR"
+}
+
+install_chrome() {
+  if command -v google-chrome-stable >/dev/null 2>&1 || command -v google-chrome >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+    echo "Info: Chrome/Chromium already installed"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "Warning: apt-get not found; cannot auto-install Chrome. Install it manually."
+    return 0
+  fi
+  echo "Info: Installing Google Chrome..."
+  local tmp_deb
+  tmp_deb="$(mktemp /tmp/chrome-XXXXXX.deb)"
+  if curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o "$tmp_deb"; then
+    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      sudo apt-get install -y "$tmp_deb" || sudo dpkg -i "$tmp_deb" && sudo apt-get install -yf
+    else
+      echo "Warning: sudo required to install Chrome via apt; skipping"
+    fi
+  fi
+  rm -f "$tmp_deb"
+}
+
+resolve_chrome_bin() {
+  for bin in google-chrome-stable google-chrome chromium-browser chromium; do
+    if command -v "$bin" >/dev/null 2>&1; then
+      command -v "$bin"
+      return 0
+    fi
+  done
+  # Fall back to puppeteer-bundled Chrome
+  if [ -d "$HOME/.cache/puppeteer/chrome" ]; then
+    local found
+    found="$(find "$HOME/.cache/puppeteer/chrome" -name "chrome" -type f -executable 2>/dev/null | sort -V | tail -1)"
+    if [ -n "$found" ]; then
+      echo "$found"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+write_chrome_cdp_service() {
+  local chrome_bin
+  if ! chrome_bin="$(resolve_chrome_bin)"; then
+    echo "Warning: Chrome binary not found; cannot write chrome-cdp.service"
+    return 1
+  fi
+  mkdir -p "$HOME/.config/systemd/user"
+  cat > "$HOME/.config/systemd/user/chrome-cdp.service" <<EOF
+[Unit]
+Description=Chrome CDP headless service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$chrome_bin \\
+  --headless=new \\
+  --no-sandbox \\
+  --disable-dev-shm-usage \\
+  --disable-gpu \\
+  --disable-software-rasterizer \\
+  --remote-debugging-port=$CHROME_CDP_PORT \\
+  --remote-debugging-address=127.0.0.1 \\
+  --user-data-dir=/tmp/chrome-cdp-profile \\
+  --disable-background-networking \\
+  --disable-default-apps \\
+  --no-first-run
+Restart=always
+RestartSec=5
+MemoryMax=2G
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
+EOF
+  echo "Info: wrote chrome-cdp.service (binary: $chrome_bin, port: $CHROME_CDP_PORT)"
+}
+
+start_chrome_cdp_systemd() {
+  if [ "$SETUP_CHROME_CDP" != "1" ]; then
+    return 0
+  fi
+  if ! systemd_user_available; then
+    echo "Warning: systemd user services unavailable; skipping Chrome CDP service setup"
+    return 0
+  fi
+  install_chrome
+  write_chrome_cdp_service || return 0
+  systemd_user_cmd daemon-reload
+  systemd_user_cmd enable chrome-cdp.service >/dev/null 2>&1 || true
+  # Restart only if the unit file changed (always restart to pick up new binary path)
+  systemd_user_cmd restart chrome-cdp.service >/dev/null 2>&1 || systemd_user_cmd start chrome-cdp.service >/dev/null 2>&1 || true
+  echo "Info: Chrome CDP service active on 127.0.0.1:$CHROME_CDP_PORT"
+}
   local attempted=0
   local runtime_stopped=0
 
@@ -1864,6 +2314,9 @@ install_opencode_local() {
       export OPENCODE_CHANNEL="\${OPENCODE_CHANNEL:-latest}"
     fi
   }
+
+  echo "Info: Running bun install in $OPENCODE_DIR"
+  devbox run -- bash -lc "bun install" || echo "Warning: bun install failed; build may fail if deps are missing."
 
   if [ -x "./scripts/install-local.sh" ]; then
     attempted=1
@@ -2000,6 +2453,10 @@ if [ -d "$OPENCODE_DIR" ]; then
   fi
 fi
 
+install_paperclip
+
+start_chrome_cdp_systemd
+
 OPENCODE_BIN=""
 if OPENCODE_BIN="$(resolve_opencode_bin)"; then
   case "$OPENCODE_SUPERVISOR" in
@@ -2094,11 +2551,15 @@ mkdir -p "$HOME/.local/share/opencode" "$HOME/.config/codebox"
   const currentKnownTarget = findKnownTarget(existingConfig, opts.remote, opts.base, repoName)?.target;
   const updatedAt = new Date().toISOString();
   const remoteHost = await readRemoteHostname(opts.remote, opts.sshOpts);
+  const tailscaleIp = opts.disableTailscale ? undefined : await readRemoteTailscaleIp(opts.remote, opts.sshOpts);
+  const publicIp = await readRemotePublicIp(opts.remote, opts.sshOpts);
   const nextConfig = upsertKnownTarget(
     existingConfig,
     {
       remote: opts.remote,
       remoteHost,
+      tailscaleIp,
+      publicIp,
       sshOpts: opts.sshOpts,
       base: opts.base,
       repo: repoName,

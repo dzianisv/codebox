@@ -22,6 +22,8 @@ codebox --remote azureuser@dev-1
 codebox --remote azureuser@dev-1 --exclude '.android-sdk-fixed' --exclude '.gradle-home'
 codebox --remote azureuser@dev-1 --opencode-repo-url https://github.com/dzianisv/opencode.git --opencode-ref dev
 codebox --remote azureuser@dev-1 --opencode-src ~/workspace/opencode
+codebox --resync --dry-run
+codebox --resync --repo codebox
 ```
 
 Quick SSH access to the synced repo on remote:
@@ -58,6 +60,8 @@ codebox tunnel --all
 - In `codebox ssh` mode, unknown flags are passed through to `ssh` (for example `-L`, `-R`, `-D`, `-N`, `-p`, `-i`).
 - `codebox tunnel` is the simplest way to pin the OpenCode tunnel in the background.
 - `codebox tunnel --repo <name>` lets you target a remembered repo from any working directory instead of implicitly using the current folder name.
+- `codebox --resync` replays repo sync for remembered targets from `~/.config/codebox.json` (optionally filtered with `--repo <name>`).
+- In `--resync` mode, sibling repos are discovered as `<cwd-parent>/<repo>`; missing local paths are skipped with a clear message.
 - `codebox` now remembers synced/tunneled remote targets in `~/.config/codebox.json`, including VM hostname, repo, SSH opts, and the localhost OpenCode port mapping.
 - `codebox tunnel --list` shows remembered targets with VM name, repo, localhost URL, remote port, and current status.
 - `codebox tunnel --all` reconciles background OpenCode tunnels for every remembered target instead of only the most recent one.
@@ -67,8 +71,8 @@ codebox tunnel --all
 - Syncs env vars into a managed remote shell/OpenCode env file and wires remote `~/.bashrc` to source it (defaults include `GITHUB_TOKEN`, `OPENAI_*`, `AZURE_OPENAI_*`, `OPENCODE_*`, `CODEX_*`, and any `*_TOKEN`). Use `--no-env`, `--env`, `--env-prefix` to control.
 - Prompts before syncing secrets or `~/.ssh` unless `--yes` is provided.
 - Use `-v/--verbose` for rsync progress output.
-- Sync mode now ensures OpenCode is running on remote (`127.0.0.1:5551`) and starts a background local SSH tunnel by default:
-  - `localhost:5551 -> remote:127.0.0.1:5551`
+- Sync mode now ensures OpenCode is running on remote (`127.0.0.1:4096`) and starts a background local SSH tunnel by default:
+  - `localhost:4096 -> remote:127.0.0.1:4096`
   - disable with `--no-opencode-tunnel`
   - override ports with `--opencode-local-port <n>` and `--opencode-remote-port <n>`
   - when the preferred local port is already occupied, `codebox` automatically picks the next free localhost port and remembers it for that remote target

@@ -75,7 +75,7 @@ try {
             repo: "codebox",
             remoteRepo: "$HOME/workspace/codebox",
             opencodeLocalPort: rememberedPort,
-            opencodeRemotePort: 5551,
+            opencodeRemotePort: 4096,
             lastSyncedAt: "2026-03-29T00:00:00.000Z",
             updatedAt: "2026-03-29T00:00:00.000Z",
           },
@@ -87,7 +87,7 @@ try {
             repo: "demo-repo",
             remoteRepo: "$HOME/workspace/demo-repo",
             opencodeLocalPort: secondRememberedPort,
-            opencodeRemotePort: 5551,
+            opencodeRemotePort: 4096,
             lastSyncedAt: "2026-03-28T23:00:00.000Z",
             updatedAt: "2026-03-28T23:00:00.000Z",
           },
@@ -99,7 +99,7 @@ try {
             repo: "demo-repo",
             remoteRepo: "$HOME/workspace/demo-repo",
             opencodeLocalPort: thirdRememberedPort,
-            opencodeRemotePort: 5551,
+            opencodeRemotePort: 4096,
             lastSyncedAt: "2026-03-28T22:00:00.000Z",
             updatedAt: "2026-03-28T22:00:00.000Z",
           },
@@ -133,11 +133,11 @@ try {
   const allDryRunOut = `${allDryRun.stdout}\n${allDryRun.stderr}`;
   assert.match(
     allDryRunOut,
-    new RegExp(`-L ${rememberedPort}:127\\.0\\.0\\.1:5551 cached-user@cached-host`),
+    new RegExp(`-L ${rememberedPort}:127\\.0\\.0\\.1:4096 cached-user@cached-host`),
   );
   assert.match(
     allDryRunOut,
-    new RegExp(`-L ${secondRememberedPort}:127\\.0\\.0\\.1:5551 other-user@other-host`),
+    new RegExp(`-L ${secondRememberedPort}:127\\.0\\.0\\.1:4096 other-user@other-host`),
   );
 
   const singleDryRun = runCodebox(["tunnel", "--config", configPath, "--dry-run"]);
@@ -149,7 +149,7 @@ try {
   const singleDryRunOut = `${singleDryRun.stdout}\n${singleDryRun.stderr}`;
   assert.match(
     singleDryRunOut,
-    new RegExp(`-L ${rememberedPort}:127\\.0\\.0\\.1:5551 cached-user@cached-host`),
+    new RegExp(`-L ${rememberedPort}:127\\.0\\.0\\.1:4096 cached-user@cached-host`),
   );
 
   const selectedRepoDryRun = runCodebox([
@@ -168,11 +168,11 @@ try {
   const selectedRepoOut = `${selectedRepoDryRun.stdout}\n${selectedRepoDryRun.stderr}`;
   assert.match(
     selectedRepoOut,
-    new RegExp(`-L ${secondRememberedPort}:127\\.0\\.0\\.1:5551 other-user@other-host`),
+    new RegExp(`-L ${secondRememberedPort}:127\\.0\\.0\\.1:4096 other-user@other-host`),
   );
   assert.doesNotMatch(
     selectedRepoOut,
-    new RegExp(`-L ${thirdRememberedPort}:127\\.0\\.0\\.1:5551 older-user@older-host`),
+    new RegExp(`-L ${thirdRememberedPort}:127\\.0\\.0\\.1:4096 older-user@older-host`),
   );
 
   const occupied = await occupyPort();
@@ -194,7 +194,7 @@ try {
               repo: "codebox",
               remoteRepo: "$HOME/workspace/codebox",
               opencodeLocalPort: occupied.port,
-              opencodeRemotePort: 5551,
+              opencodeRemotePort: 4096,
               lastSyncedAt: "2026-03-29T00:00:00.000Z",
               updatedAt: "2026-03-29T00:00:00.000Z",
             },
@@ -212,7 +212,7 @@ try {
       `Occupied-port tunnel dry-run failed: ${reassigned.stderr || reassigned.stdout}`,
     );
     const reassignedOut = `${reassigned.stdout}\n${reassigned.stderr}`;
-    const match = reassignedOut.match(/-L (\d+):127\.0\.0\.1:5551 cached-user@cached-host/);
+    const match = reassignedOut.match(/-L (\d+):127\.0\.0\.1:4096 cached-user@cached-host/);
     assert.ok(match, `Did not find reassigned tunnel command in output: ${reassignedOut}`);
     const assignedPort = Number.parseInt(match[1], 10);
     assert.notEqual(assignedPort, occupied.port, "Expected occupied remembered port to be reassigned");
