@@ -2233,6 +2233,15 @@ start_paperclip() {
     echo "Warning: paperclip CLI dist not found at $paperclip_cli; skipping start"
     return 0
   fi
+  local paperclip_bind
+  local paperclip_health_host
+  if [ "$DISABLE_TAILSCALE" = "1" ]; then
+    paperclip_bind="localhost"
+    paperclip_health_host="127.0.0.1"
+  else
+    paperclip_bind="tailnet"
+    paperclip_health_host="\${TAILSCALE_IP:-127.0.0.1}"
+  fi
   local pids
   pids="$(pgrep -f paperclipai 2>/dev/null || true)"
   if [ -n "$pids" ]; then
@@ -2241,12 +2250,12 @@ start_paperclip() {
     sleep 2
   fi
   mkdir -p "$HOME/.paperclip"
-  echo "Info: Starting paperclip from source build..."
-  nohup node "$paperclip_cli" onboard --yes --bind tailnet >> "$HOME/.paperclip/server.log" 2>&1 &
+  echo "Info: Starting paperclip from source build (bind: $paperclip_bind)..."
+  nohup node "$paperclip_cli" onboard --yes --bind "$paperclip_bind" >> "$HOME/.paperclip/server.log" 2>&1 &
   echo "Info: paperclip started (PID $!)"
   for _ in $(seq 1 30); do
     sleep 1
-    if curl -sf "http://$(tailscale ip -4 2>/dev/null || echo 127.0.0.1):3100/api/health" >/dev/null 2>&1; then
+    if curl -sf "http://$paperclip_health_host:3100/api/health" >/dev/null 2>&1; then
       echo "Info: paperclip is ready"
       return 0
     fi
@@ -2520,8 +2529,6 @@ if [ -d "$OPENCODE_DIR" ]; then
 fi
 
 install_paperclip
-start_paperclip
-install_copilot_cli
 
 # Symlink tools into /usr/local/bin so nohup/systemd processes (e.g. paperclip) can find them
 # Must run after opencode and codex are installed into ~/.local/bin
@@ -2535,6 +2542,9 @@ if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
 else
   echo "Warning: sudo not available; skipping /usr/local/bin symlinks for codex/opencode"
 fi
+
+start_paperclip
+install_copilot_cli
 
 start_chrome_cdp_systemd
 
