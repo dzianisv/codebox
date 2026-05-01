@@ -2223,6 +2223,35 @@ install_paperclip() {
   fi
   echo "Info: Running pnpm install in $PAPERCLIP_DIR"
   (cd "$PAPERCLIP_DIR" && pnpm install) || echo "Warning: pnpm install failed in $PAPERCLIP_DIR"
+  echo "Info: Building paperclip from source in $PAPERCLIP_DIR"
+  (cd "$PAPERCLIP_DIR" && pnpm -r build) || echo "Warning: pnpm build failed in $PAPERCLIP_DIR"
+}
+
+start_paperclip() {
+  local paperclip_cli="$PAPERCLIP_DIR/cli/dist/index.js"
+  if [ ! -f "$paperclip_cli" ]; then
+    echo "Warning: paperclip CLI dist not found at $paperclip_cli; skipping start"
+    return 0
+  fi
+  local pids
+  pids="$(pgrep -f paperclipai 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    echo "Info: Killing existing paperclip processes: $pids"
+    for pid in $pids; do kill "$pid" 2>/dev/null || true; done
+    sleep 2
+  fi
+  mkdir -p "$HOME/.paperclip"
+  echo "Info: Starting paperclip from source build..."
+  nohup node "$paperclip_cli" onboard --yes --bind tailnet >> "$HOME/.paperclip/server.log" 2>&1 &
+  echo "Info: paperclip started (PID $!)"
+  for _ in $(seq 1 30); do
+    sleep 1
+    if curl -sf "http://$(tailscale ip -4 2>/dev/null || echo 127.0.0.1):3100/api/health" >/dev/null 2>&1; then
+      echo "Info: paperclip is ready"
+      return 0
+    fi
+  done
+  echo "Warning: paperclip did not become ready after 30s"
 }
 
 install_copilot_cli() {
@@ -2491,6 +2520,7 @@ if [ -d "$OPENCODE_DIR" ]; then
 fi
 
 install_paperclip
+start_paperclip
 install_copilot_cli
 
 start_chrome_cdp_systemd
