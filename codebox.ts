@@ -2297,6 +2297,32 @@ start_paperclip() {
   echo "Warning: paperclip did not become ready after 30s"
 }
 
+get_paperclip_pids() {
+  local legacy_pattern="$PAPERCLIP_DIR/cli/dist/index.js onboard"
+  local pnpm_pattern="paperclipai dev onboard"
+  local tsx_pattern="$PAPERCLIP_DIR.*src/index.ts onboard|src/index.ts onboard.*$PAPERCLIP_DIR"
+  (pgrep -f "$legacy_pattern" 2>/dev/null || true; pgrep -f "$pnpm_pattern" 2>/dev/null || true; pgrep -f "$tsx_pattern" 2>/dev/null || true) | sort -u
+}
+
+paperclip_health_host() {
+  if [ "$DISABLE_TAILSCALE" = "1" ]; then
+    printf '%s\\n' "127.0.0.1"
+  else
+    printf '%s\\n' "\${TAILSCALE_IP:-127.0.0.1}"
+  fi
+}
+
+paperclip_runtime_healthy() {
+  local pids
+  pids="$(get_paperclip_pids)"
+  if [ -z "$pids" ]; then
+    return 1
+  fi
+  local health_host
+  health_host="$(paperclip_health_host)"
+  curl -sf "http://$health_host:3100/api/health" >/dev/null 2>&1
+}
+
 install_copilot_cli() {
   if [ -x "$HOME/.local/bin/copilot" ] || command -v copilot >/dev/null 2>&1; then
     echo "Info: GitHub Copilot CLI already installed"
@@ -2486,7 +2512,9 @@ start_opencode_nohup() {
 
 write_opencode_systemd_unit() {
   mkdir -p "$HOME/.config/systemd/user" "$HOME/.cache/codebox"
-  cat > "$HOME/.config/systemd/user/opencode-serve.service" <<EOF
+  local unit_path="$HOME/.config/systemd/user/opencode-serve.service"
+  local tmp_path="$unit_path.tmp.$$"
+  cat > "$tmp_path" <<EOF
 [Unit]
 Description=OpenCode headless server
 After=network-online.target
@@ -2504,6 +2532,19 @@ StandardError=append:%h/.cache/codebox/opencode-serve.log
 [Install]
 WantedBy=default.target
 EOF
+  if [ -f "$unit_path" ] && cmp -s "$tmp_path" "$unit_path"; then
+    rm -f "$tmp_path"
+    OPENCODE_SYSTEMD_UNIT_CHANGED="0"
+    echo "Info: OpenCode systemd unit unchanged at $unit_path"
+    return 0
+  fi
+  mv "$tmp_path" "$unit_path"
+  OPENCODE_SYSTEMD_UNIT_CHANGED="1"
+  echo "Info: wrote OpenCode systemd unit at $unit_path"
+}
+
+opencode_runtime_healthy() {
+  is_port_listening "$OPENCODE_PORT"
 }
 
 start_opencode_systemd() {
@@ -2511,10 +2552,31 @@ start_opencode_systemd() {
     return 1
   fi
   ensure_linger_enabled
+  OPENCODE_SYSTEMD_UNIT_CHANGED="0"
   write_opencode_systemd_unit
-  systemd_user_cmd daemon-reload
-  systemd_user_cmd enable --now opencode-serve.service >/dev/null
-  systemd_user_cmd restart opencode-serve.service >/dev/null
+  if [ "$OPENCODE_SYSTEMD_UNIT_CHANGED" = "1" ]; then
+    systemd_user_cmd daemon-reload
+  fi
+  if systemd_user_cmd enable opencode-serve.service >/dev/null 2>&1; then
+    echo "Info: OpenCode systemd service enabled"
+  else
+    echo "Warning: failed to enable OpenCode systemd service; continuing with runtime start"
+  fi
+  if systemd_user_cmd is-active --quiet opencode-serve.service; then
+    if [ "$OPENCODE_SYSTEMD_UNIT_CHANGED" = "1" ]; then
+      echo "Info: restarting OpenCode systemd service to apply updated unit"
+      systemd_user_cmd restart opencode-serve.service >/dev/null
+    elif opencode_runtime_healthy; then
+      echo "Info: OpenCode systemd service already active and healthy on $OPENCODE_HOSTNAME:$OPENCODE_PORT; skipping restart"
+      return 0
+    else
+      echo "Info: OpenCode systemd service active but unhealthy; restarting"
+      systemd_user_cmd restart opencode-serve.service >/dev/null
+    fi
+  else
+    echo "Info: OpenCode systemd service inactive; starting"
+    systemd_user_cmd start opencode-serve.service >/dev/null
+  fi
   echo "Info: ensured OpenCode systemd user service opencode-serve.service"
 }
 
@@ -2554,15 +2616,26 @@ if [ -d "$OPENCODE_DIR" ]; then
   cd "$OPENCODE_DIR"
   devbox install
   if [ "$OPENCODE_REINSTALL" = "1" ]; then
+    echo "Info: OPENCODE_REINSTALL=1; forcing OpenCode local install hooks"
     if ! install_opencode_local; then
       echo "Warning: OpenCode reinstall failed; continuing bootstrap."
     fi
-  elif ! install_opencode_local; then
-    echo "Warning: OpenCode local install failed; continuing bootstrap."
+  elif OPENCODE_BIN_EXISTING="$(resolve_opencode_bin)"; then
+    echo "Info: OpenCode binary already present at $OPENCODE_BIN_EXISTING; skipping local install hooks"
+  else
+    echo "Info: OpenCode binary not found; running local install hooks"
+    if ! install_opencode_local; then
+      echo "Warning: OpenCode local install failed; continuing bootstrap."
+    fi
   fi
 fi
 
-install_paperclip
+if paperclip_runtime_healthy; then
+  echo "Info: paperclip already running and healthy; skipping install/start"
+else
+  echo "Info: paperclip not healthy/running; installing and starting"
+  install_paperclip
+fi
 
 install_copilot_cli
 
@@ -2579,7 +2652,12 @@ else
   echo "Warning: sudo not available; skipping /usr/local/bin symlinks for codex/opencode/copilot"
 fi
 
-start_paperclip
+if paperclip_runtime_healthy; then
+  echo "Info: paperclip already running and healthy; skipping restart"
+else
+  echo "Info: starting paperclip"
+  start_paperclip
+fi
 
 start_chrome_cdp_systemd
 

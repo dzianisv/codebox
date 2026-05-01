@@ -102,7 +102,9 @@ try {
     defaultOut,
     /git -C "\$OPENCODE_DIR" checkout -B "\$OPENCODE_REF" "refs\/remotes\/origin\/\$OPENCODE_REF"/,
   );
-  assert.match(defaultOut, /systemd_user_cmd stop opencode-serve\.service/);
+  assert.match(defaultOut, /elif OPENCODE_BIN_EXISTING="\$\(resolve_opencode_bin\)"; then/);
+  assert.match(defaultOut, /OpenCode binary already present at \$OPENCODE_BIN_EXISTING; skipping local install hooks/);
+  assert.match(defaultOut, /if paperclip_runtime_healthy; then[\s\S]*skipping install\/start[\s\S]*install_paperclip/);
   assert.doesNotMatch(defaultOut, /sync opencode repo/);
 
   // Default sync must explicitly --include .git so it is always transferred
@@ -181,13 +183,17 @@ try {
   assert.match(systemdOut, /OPENCODE_SUPERVISOR=\$'systemd'/);
   assert.match(systemdOut, /git clone "\$OPENCODE_REPO_URL" "\$scratch_dir\/repo"/);
   assert.match(systemdOut, /preserving synced local OpenCode source/);
-  assert.match(systemdOut, /systemd_user_cmd stop opencode-serve\.service/);
+  assert.match(systemdOut, /if \[ "\$OPENCODE_REINSTALL" = "1" \]; then[\s\S]*install_opencode_local/);
   assert.match(
     systemdOut,
     /resolve_opencode_bin\(\) \{[\s\S]*\$HOME\/\.local\/bin\/opencode[\s\S]*\$HOME\/\.opencode\/bin\/opencode/,
   );
   assert.match(systemdOut, /bun run install:local/);
   assert.match(systemdOut, /bun run --cwd packages\/opencode install:local/);
+  assert.match(systemdOut, /if systemd_user_cmd is-active --quiet opencode-serve\.service; then/);
+  assert.match(systemdOut, /OpenCode systemd service already active and healthy .* skipping restart/);
+  assert.match(systemdOut, /OpenCode systemd service inactive; starting/);
+  assert.doesNotMatch(systemdOut, /systemd_user_cmd enable --now opencode-serve\.service/);
   assert.match(systemdOut, /WorkingDirectory=\$OPENCODE_DIR/);
   assert.match(
     systemdOut,
