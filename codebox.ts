@@ -2564,6 +2564,8 @@ fi
 
 install_paperclip
 
+install_copilot_cli
+
 # Symlink tools into /usr/local/bin so nohup/systemd processes (e.g. paperclip) can find them
 # Must run after opencode and codex are installed into ~/.local/bin
 if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
@@ -2578,7 +2580,6 @@ else
 fi
 
 start_paperclip
-install_copilot_cli
 
 start_chrome_cdp_systemd
 
