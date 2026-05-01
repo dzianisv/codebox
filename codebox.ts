@@ -2244,7 +2244,7 @@ start_paperclip() {
   local pids
   local legacy_pattern="$PAPERCLIP_DIR/cli/dist/index.js onboard"
   local pnpm_pattern="paperclipai dev onboard"
-  local tsx_pattern="src/index.ts onboard"
+  local tsx_pattern="$PAPERCLIP_DIR.*src/index.ts onboard|src/index.ts onboard.*$PAPERCLIP_DIR"
   pids="$( (pgrep -f "$legacy_pattern" 2>/dev/null || true; pgrep -f "$pnpm_pattern" 2>/dev/null || true; pgrep -f "$tsx_pattern" 2>/dev/null || true) | sort -u )"
   if [ -n "$pids" ]; then
     echo "Info: Killing existing paperclip processes: $pids"
