@@ -28,6 +28,7 @@ type Options = {
   syncOpencodeConfig: boolean;
   syncOpencodeAuth: boolean;
   syncGhConfig: boolean;
+  syncCopilotConfig: boolean;
   syncKubeConfig: boolean;
   syncSshKeys: boolean;
   includeCodexHistory: boolean;
@@ -104,6 +105,7 @@ Options:
   --no-opencode-config        Skip syncing ~/.config/opencode and ~/.opencode
   --no-opencode-auth          Skip syncing ~/.local/share/opencode auth state
   --no-gh-config              Skip syncing ~/.config/gh
+  --no-copilot-config         Skip syncing ~/.config/github-copilot
   --no-kube-config            Skip syncing ~/.kube
   --sync-ssh                  Sync ~/.ssh (includes private keys) [off by default]
   --include-codex-history     Include ~/.codex/history.jsonl (default: excluded)
@@ -1589,6 +1591,7 @@ async function main() {
     syncOpencodeConfig,
     syncOpencodeAuth,
     syncGhConfig: !hasFlag(args, "--no-gh-config"),
+    syncCopilotConfig: !hasFlag(args, "--no-copilot-config"),
     syncKubeConfig: !hasFlag(args, "--no-kube-config"),
     syncSshKeys: hasFlag(args, "--sync-ssh"),
     includeCodexHistory: hasFlag(args, "--include-codex-history"),
@@ -1906,6 +1909,22 @@ async function main() {
     }
   }
 
+  if (opts.syncCopilotConfig) {
+    const copilotConfig = resolve(os.homedir(), ".config/github-copilot");
+    if (existsSync(copilotConfig)) {
+      actions.push({
+        label: "sync ~/.config/github-copilot",
+        cmd: rsyncCmd(
+          opts.sshOpts,
+          `${copilotConfig}/`,
+          `${opts.remote}:~/.config/github-copilot/`,
+          [],
+          opts.verbose,
+        ),
+      });
+    }
+  }
+
   if (opts.syncKubeConfig) {
     const kubeDir = resolve(os.homedir(), ".kube");
     if (existsSync(kubeDir)) {
@@ -2206,6 +2225,19 @@ install_paperclip() {
   (cd "$PAPERCLIP_DIR" && pnpm install) || echo "Warning: pnpm install failed in $PAPERCLIP_DIR"
 }
 
+install_copilot_cli() {
+  if command -v copilot >/dev/null 2>&1; then
+    echo "Info: GitHub Copilot CLI already installed"
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "Warning: npm not found; cannot install GitHub Copilot CLI"
+    return 0
+  fi
+  echo "Info: Installing @github/copilot CLI..."
+  npm install -g @github/copilot || echo "Warning: failed to install @github/copilot"
+}
+
 install_chrome() {
   if command -v google-chrome-stable >/dev/null 2>&1 || command -v google-chrome >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
     echo "Info: Chrome/Chromium already installed"
@@ -2454,6 +2486,7 @@ if [ -d "$OPENCODE_DIR" ]; then
 fi
 
 install_paperclip
+install_copilot_cli
 
 start_chrome_cdp_systemd
 
