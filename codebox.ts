@@ -2226,7 +2226,7 @@ install_paperclip() {
 }
 
 install_copilot_cli() {
-  if command -v copilot >/dev/null 2>&1; then
+  if [ -x "$HOME/.local/bin/copilot" ] || command -v copilot >/dev/null 2>&1; then
     echo "Info: GitHub Copilot CLI already installed"
     return 0
   fi
@@ -2234,8 +2234,11 @@ install_copilot_cli() {
     echo "Warning: npm not found; cannot install GitHub Copilot CLI"
     return 0
   fi
-  echo "Info: Installing @github/copilot CLI..."
-  npm install -g @github/copilot || echo "Warning: failed to install @github/copilot"
+  echo "Info: Installing @github/copilot CLI into ~/.local..."
+  mkdir -p "$HOME/.local"
+  npm install -g --prefix "$HOME/.local" @github/copilot \
+    || { echo "Warning: failed to install @github/copilot"; return 0; }
+  echo "Info: GitHub Copilot CLI installed at $HOME/.local/bin/copilot"
 }
 
 install_chrome() {
