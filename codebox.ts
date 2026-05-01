@@ -2228,9 +2228,8 @@ install_paperclip() {
 }
 
 start_paperclip() {
-  local paperclip_cli="$PAPERCLIP_DIR/cli/dist/index.js"
-  if [ ! -f "$paperclip_cli" ]; then
-    echo "Warning: paperclip CLI dist not found at $paperclip_cli; skipping start"
+  if [ ! -d "$PAPERCLIP_DIR" ]; then
+    echo "Warning: paperclip directory not found at $PAPERCLIP_DIR; skipping start"
     return 0
   fi
   local paperclip_bind
@@ -2243,9 +2242,10 @@ start_paperclip() {
     paperclip_health_host="\${TAILSCALE_IP:-127.0.0.1}"
   fi
   local pids
-  local source_pattern="node $paperclip_cli onboard"
-  local wrapper_pattern="paperclipai"
-  pids="$( (pgrep -f "$source_pattern" 2>/dev/null || true; pgrep -f "$wrapper_pattern" 2>/dev/null || true) | sort -u )"
+  local legacy_pattern="$PAPERCLIP_DIR/cli/dist/index.js onboard"
+  local pnpm_pattern="paperclipai dev onboard"
+  local tsx_pattern="tsx src/index.ts onboard"
+  pids="$( (pgrep -f "$legacy_pattern" 2>/dev/null || true; pgrep -f "$pnpm_pattern" 2>/dev/null || true; pgrep -f "$tsx_pattern" 2>/dev/null || true) | sort -u )"
   if [ -n "$pids" ]; then
     echo "Info: Killing existing paperclip processes: $pids"
     for pid in $pids; do
@@ -2280,7 +2280,7 @@ start_paperclip() {
   fi
   mkdir -p "$HOME/.paperclip"
   echo "Info: Starting paperclip from source build (bind: $paperclip_bind)..."
-  nohup node "$paperclip_cli" onboard --yes --bind "$paperclip_bind" >> "$HOME/.paperclip/server.log" 2>&1 &
+  nohup sh -c 'cd "$1" && exec pnpm --filter paperclipai dev onboard --yes --bind "$2"' sh "$PAPERCLIP_DIR" "$paperclip_bind" >> "$HOME/.paperclip/server.log" 2>&1 &
   local paperclip_pid="$!"
   echo "Info: paperclip started (PID $paperclip_pid)"
   for _ in $(seq 1 30); do
