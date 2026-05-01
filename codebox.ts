@@ -2243,18 +2243,52 @@ start_paperclip() {
     paperclip_health_host="\${TAILSCALE_IP:-127.0.0.1}"
   fi
   local pids
-  pids="$(pgrep -f paperclipai 2>/dev/null || true)"
+  local source_pattern="node $paperclip_cli onboard"
+  local wrapper_pattern="paperclipai"
+  pids="$( (pgrep -f "$source_pattern" 2>/dev/null || true; pgrep -f "$wrapper_pattern" 2>/dev/null || true) | sort -u )"
   if [ -n "$pids" ]; then
     echo "Info: Killing existing paperclip processes: $pids"
-    for pid in $pids; do kill "$pid" 2>/dev/null || true; done
-    sleep 2
+    for pid in $pids; do
+      if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+      fi
+    done
+    for _ in $(seq 1 10); do
+      local still_running=""
+      for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+          still_running="$still_running $pid"
+        fi
+      done
+      if [ -z "$still_running" ]; then
+        break
+      fi
+      sleep 1
+    done
+    local stubborn_pids=""
+    for pid in $pids; do
+      if kill -0 "$pid" 2>/dev/null; then
+        stubborn_pids="$stubborn_pids $pid"
+      fi
+    done
+    if [ -n "$stubborn_pids" ]; then
+      echo "Info: Force killing stubborn paperclip processes:$stubborn_pids"
+      for pid in $stubborn_pids; do
+        kill -9 "$pid" 2>/dev/null || true
+      done
+    fi
   fi
   mkdir -p "$HOME/.paperclip"
   echo "Info: Starting paperclip from source build (bind: $paperclip_bind)..."
   nohup node "$paperclip_cli" onboard --yes --bind "$paperclip_bind" >> "$HOME/.paperclip/server.log" 2>&1 &
-  echo "Info: paperclip started (PID $!)"
+  local paperclip_pid="$!"
+  echo "Info: paperclip started (PID $paperclip_pid)"
   for _ in $(seq 1 30); do
     sleep 1
+    if ! kill -0 "$paperclip_pid" 2>/dev/null; then
+      echo "Warning: paperclip process $paperclip_pid exited before becoming ready"
+      return 0
+    fi
     if curl -sf "http://$paperclip_health_host:3100/api/health" >/dev/null 2>&1; then
       echo "Info: paperclip is ready"
       return 0
@@ -2533,14 +2567,14 @@ install_paperclip
 # Symlink tools into /usr/local/bin so nohup/systemd processes (e.g. paperclip) can find them
 # Must run after opencode and codex are installed into ~/.local/bin
 if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-  for tool_bin in codex opencode; do
+  for tool_bin in codex opencode copilot; do
     if [ -x "$HOME/.local/bin/$tool_bin" ]; then
       sudo ln -sf "$HOME/.local/bin/$tool_bin" "/usr/local/bin/$tool_bin"
       echo "Info: linked /usr/local/bin/$tool_bin -> $HOME/.local/bin/$tool_bin"
     fi
   done
 else
-  echo "Warning: sudo not available; skipping /usr/local/bin symlinks for codex/opencode"
+  echo "Warning: sudo not available; skipping /usr/local/bin symlinks for codex/opencode/copilot"
 fi
 
 start_paperclip
