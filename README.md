@@ -68,8 +68,8 @@ codebox tunnel --all
 - Syncs `.git` by default so the remote is a real git repo.
 - Excludes `codex-rs/target*`, `node_modules`, `dist`, `.venv` by default.
 - Supports repeatable `--exclude` flags for repo-local heavyweight directories that should stay local.
-- Syncs env vars into a managed remote shell/OpenCode env file and wires remote `~/.bashrc` to source it (defaults include `GITHUB_TOKEN`, `OPENAI_*`, `AZURE_OPENAI_*`, `OPENCODE_*`, `CODEX_*`, and any `*_TOKEN`). Use `--no-env`, `--env`, `--env-prefix` to control.
-- Prompts before syncing secrets or `~/.ssh` unless `--yes` is provided.
+- Syncs env vars into a managed remote shell/OpenCode env file and wires remote `~/.bashrc` to source it by default (defaults include `GITHUB_TOKEN`, `OPENAI_*`, `AZURE_OPENAI_*`, `OPENCODE_*`, `CODEX_*`, and any `*_TOKEN`). Use `--no-env`, `--env`, `--env-prefix` to control.
+- Prompts before syncing `~/.ssh` private keys unless `--yes` is provided.
 - Use `-v/--verbose` for rsync progress output.
 - Sync mode now ensures OpenCode is running on remote (`127.0.0.1:4096`) and starts a background local SSH tunnel by default:
   - `localhost:4096 -> remote:127.0.0.1:4096`

@@ -117,7 +117,7 @@ Options:
   --env <NAME>                Also sync a specific env var (repeatable)
   --env-prefix <PREFIX>       Sync env vars with this prefix (repeatable)
   --reinstall-opencode        Force reinstall of OpenCode on the remote (stops service, re-runs install hooks)
-  --yes                       Assume yes for prompts (env/ssh sync)
+  --yes                       Assume yes for prompts (for example --sync-ssh private key sync)
   -v, --verbose               Verbose rsync output (progress)
   --dry-run                   Print actions without executing
 
@@ -1955,15 +1955,6 @@ async function main() {
 
   if (opts.syncEnv) {
     opts.envVars = collectEnvVars(args);
-    const envKeys = Object.keys(opts.envVars).sort();
-    if (envKeys.length > 0) {
-      const shown = envKeys.slice(0, 10);
-      const suffix = envKeys.length > 10 ? ` (+${envKeys.length - 10} more)` : "";
-      await promptYes(
-        `About to sync ${envKeys.length} env vars into remote shell/OpenCode env: ${shown.join(", ")}${suffix}.`,
-        opts.assumeYes,
-      );
-    }
   }
 
   const devboxCodexJson = `{

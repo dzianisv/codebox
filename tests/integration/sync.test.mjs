@@ -49,26 +49,30 @@ function initGitRepo(dir, originUrl) {
 initGitRepo(goodOpencodeRepo, "git@github.com:dzianisv/opencode.git");
 initGitRepo(badOpencodeRepo, "https://github.com/example/not-opencode.git");
 
-function runSync(args) {
+function runSync(args, options = {}) {
+  const syncArgs = [
+    "codebox.ts",
+    "--remote",
+    "dev@host",
+    "--dry-run",
+    "--no-codex-config",
+    "--no-gh-config",
+    "--no-opencode-tunnel",
+    ...args,
+  ];
+  if (options.includeNoEnv !== false) {
+    syncArgs.splice(4, 0, "--no-env");
+  }
   return spawnSync(
     "bun",
-    [
-      "codebox.ts",
-      "--remote",
-      "dev@host",
-      "--dry-run",
-      "--no-env",
-      "--no-codex-config",
-      "--no-gh-config",
-      "--no-opencode-tunnel",
-      ...args,
-    ],
+    syncArgs,
     {
       cwd: repoRoot,
       encoding: "utf8",
       env: {
         ...process.env,
         HOME: tempHome,
+        ...(options.env ?? {}),
       },
     },
   );
@@ -86,6 +90,20 @@ function runResync(args, cwd) {
 }
 
 try {
+  const nonInteractiveEnvSync = runSync([], {
+    includeNoEnv: false,
+    env: { CODEBOX_SYNC_TEST_TOKEN: "codebox-sync-test-token" },
+  });
+  assert.equal(
+    nonInteractiveEnvSync.status,
+    0,
+    `Env sync dry-run should not require --yes: ${nonInteractiveEnvSync.stderr || nonInteractiveEnvSync.stdout}`,
+  );
+  const nonInteractiveEnvSyncOut = `${nonInteractiveEnvSync.stdout}\n${nonInteractiveEnvSync.stderr}`;
+  assert.match(nonInteractiveEnvSyncOut, /export CODEBOX_SYNC_TEST_TOKEN=\$'codebox-sync-test-token'/);
+  assert.doesNotMatch(nonInteractiveEnvSyncOut, /Use --yes to proceed/);
+  assert.doesNotMatch(nonInteractiveEnvSyncOut, /Type 'yes' to continue/);
+
   const defaultManagedOpencode = runSync([]);
   assert.equal(
     defaultManagedOpencode.status,
