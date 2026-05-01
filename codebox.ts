@@ -2333,6 +2333,8 @@ start_chrome_cdp_systemd() {
   systemd_user_cmd restart chrome-cdp.service >/dev/null 2>&1 || systemd_user_cmd start chrome-cdp.service >/dev/null 2>&1 || true
   echo "Info: Chrome CDP service active on 127.0.0.1:$CHROME_CDP_PORT"
 }
+
+install_opencode_local() {
   local attempted=0
   local runtime_stopped=0
 
