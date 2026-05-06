@@ -17,7 +17,7 @@
     "bun": ">=1.0.0"
   },
   "scripts": {
-    "test": "node tests/integration/install.test.mjs && node tests/integration/ssh.test.mjs && node tests/integration/sync.test.mjs && node tests/integration/tunnel-registry.test.mjs",
+    "test": "node tests/integration/install.test.mjs && node tests/integration/ssh.test.mjs && node tests/integration/cdp.test.mjs && node tests/integration/sync.test.mjs && node tests/integration/tunnel-registry.test.mjs",
     "install:devbox": "bun run scripts/install-devbox.ts"
   },
   "keywords": [

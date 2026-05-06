@@ -81,12 +81,13 @@ function usage(): string {
   ./codebox.ts ssh [<user@host>] [options] [ssh-options] [-- <remote command...>]
   ./codebox.ts list [--repo <name>]                List all remembered VM targets
   ./codebox.ts tunnel [<user@host>] [options]
+  ./codebox.ts cdp [<user@host>] [options]
 
 Options:
   --remote <user@host>        SSH target (default: recent remembered target)
   --ssh-opts <string>         SSH options (default: "-i ~/.ssh/id_rsa -o IdentitiesOnly=yes")
   --base <path>               Remote base dir (default: "${DEFAULT_BASE}")
-  --repo <name>               Tunnel/list/resync filter: remembered repo to target
+  --repo <name>               Tunnel/cdp/list/resync filter: remembered repo to target
   --resync                    Sync mode only: re-sync all remembered targets (optionally filtered by --repo)
   --opencode-src <path>       Optional local opencode repo path to sync instead of managed remote checkout
   --opencode-repo-url <url>   OpenCode git remote to anchor on the target (default: "${DEFAULT_OPENCODE_REPO_URL}")
@@ -96,6 +97,8 @@ Options:
   --disable-tailscale         Skip Tailscale setup; OpenCode serves on 127.0.0.1 only
   --opencode-local-port <n>   Local forwarded port (default: 4096)
   --opencode-remote-port <n>  Remote OpenCode port (default: 4096)
+  --cdp-local-port <n>        Local Chrome CDP port to expose (default: 9222)
+  --cdp-remote-port <n>       Remote reverse-forwarded CDP port (default: 9222)
   --opencode-supervisor <m>   Remote OpenCode supervisor: auto|nohup|systemd (default: ${DEFAULT_OPENCODE_SUPERVISOR})
   --list                      Tunnel mode only: show remembered tunnel targets
   --all                       Tunnel mode only: start/reconcile all remembered tunnel targets
@@ -135,6 +138,8 @@ Example:
   ./codebox.ts tunnel --repo termux-app
   ./codebox.ts tunnel --list
   ./codebox.ts tunnel --all
+  ./codebox.ts cdp
+  ./codebox.ts cdp --cdp-local-port 9333 --cdp-remote-port 9223
   ./codebox.ts --resync
   ./codebox.ts --resync --repo termux-app --dry-run
   ./codebox.ts ssh --remote azureuser@dev-1 -- git status -sb
@@ -651,6 +656,8 @@ function findPositionalRemote(args: string[]): string | undefined {
     "--opencode-ref",
     "--opencode-local-port",
     "--opencode-remote-port",
+    "--cdp-local-port",
+    "--cdp-remote-port",
     "--opencode-supervisor",
     "--paperclip-repo-url",
     "--config",
@@ -692,6 +699,8 @@ function parseSshModeArgs(rawArgs: string[]): ParsedSshModeArgs {
     "--opencode-ref",
     "--opencode-local-port",
     "--opencode-remote-port",
+    "--cdp-local-port",
+    "--cdp-remote-port",
     "--opencode-supervisor",
     "--paperclip-repo-url",
     "--config",
@@ -929,6 +938,109 @@ function buildTunnelCommand(params: {
     `${params.localPort}:127.0.0.1:${params.remotePort}`,
     params.remote,
   ];
+}
+
+function buildCdpReverseTunnelCommand(params: {
+  remote: string;
+  sshOpts: string;
+  localPort: number;
+  remotePort: number;
+}): string[] {
+  const sshArgs = shellSplit(params.sshOpts).map(expandTildeArg);
+  return [
+    "ssh",
+    ...sshArgs,
+    "-f",
+    "-N",
+    "-o",
+    "ExitOnForwardFailure=yes",
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=3",
+    "-R",
+    `${params.remotePort}:127.0.0.1:${params.localPort}`,
+    params.remote,
+  ];
+}
+
+async function ensureLocalPortListeningForCdp(localPort: number): Promise<void> {
+  const listeners = await listListeningPids(localPort);
+  if (listeners.length > 0) {
+    return;
+  }
+  throw new Error(
+    `Cannot start CDP reverse tunnel: localhost:${localPort} is not listening. Start Chrome with CDP enabled and try again.`,
+  );
+}
+
+async function inspectReverseTunnelProcess(params: {
+  remote: string;
+  localPort: number;
+  remotePort: number;
+}): Promise<"expected" | "missing"> {
+  const result = await runCapture(["ps", "-ax", "-o", "command="]);
+  if (result.code !== 0) {
+    return "missing";
+  }
+  const reverseSpec = `${params.remotePort}:127.0.0.1:${params.localPort}`;
+  const hasReverseFlag = (args: string[]): boolean => {
+    for (let i = 0; i < args.length; i += 1) {
+      const arg = args[i];
+      if (arg === "-R") {
+        if (args[i + 1] === reverseSpec) {
+          return true;
+        }
+        continue;
+      }
+      if (arg.startsWith("-R") && arg.slice(2) === reverseSpec) {
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const line of result.stdout.split("\n")) {
+    const desc = line.trim();
+    if (!desc) continue;
+    let args: string[];
+    try {
+      args = shellSplit(desc);
+    } catch {
+      continue;
+    }
+    if (args.length === 0) continue;
+    const isSshProcess = basename(args[0]) === "ssh";
+    if (!isSshProcess) continue;
+    if (!args.includes(params.remote)) continue;
+    if (!hasReverseFlag(args)) continue;
+    return "expected";
+  }
+  return "missing";
+}
+
+async function ensureBackgroundCdpReverseTunnel(params: {
+  remote: string;
+  sshOpts: string;
+  localPort: number;
+  remotePort: number;
+}): Promise<"reused" | "started"> {
+  const existing = await inspectReverseTunnelProcess(params);
+  if (existing === "expected") {
+    console.log(
+      `[codebox] Reusing existing CDP reverse tunnel on ${params.remote}:127.0.0.1:${params.remotePort}`,
+    );
+    return "reused";
+  }
+
+  await run(buildCdpReverseTunnelCommand(params));
+  await sleep(200);
+  const started = await inspectReverseTunnelProcess(params);
+  if (started === "expected") {
+    return "started";
+  }
+  throw new Error(
+    `SSH reverse tunnel command returned but expected tunnel -R ${params.remotePort}:127.0.0.1:${params.localPort} was not found.`,
+  );
 }
 
 async function inspectTunnelPort(params: {
@@ -1297,8 +1409,20 @@ async function runResync(params: {
 
 async function main() {
   const rawArgs = process.argv.slice(2);
-  const mode = rawArgs[0] === "ssh" ? "ssh" : rawArgs[0] === "tunnel" ? "tunnel" : rawArgs[0] === "list" ? "list" : "sync";
-  let args = (mode === "ssh" || mode === "tunnel" || mode === "list") ? rawArgs.slice(1) : rawArgs;
+  const mode =
+    rawArgs[0] === "ssh"
+      ? "ssh"
+      : rawArgs[0] === "tunnel"
+        ? "tunnel"
+        : rawArgs[0] === "cdp"
+          ? "cdp"
+          : rawArgs[0] === "list"
+            ? "list"
+            : "sync";
+  let args =
+    mode === "ssh" || mode === "tunnel" || mode === "cdp" || mode === "list"
+      ? rawArgs.slice(1)
+      : rawArgs;
   let sshExecArgs: string[] = [];
   let sshPassthroughArgs: string[] = [];
   let positionalRemote: string | undefined = findPositionalRemote(args);
@@ -1323,7 +1447,10 @@ async function main() {
   const tunnelListMode = mode === "tunnel" && hasFlag(args, "--list");
   const tunnelAllMode = mode === "tunnel" && hasFlag(args, "--all");
   const resyncMode = mode === "sync" && hasFlag(args, "--resync");
-  const requestedRepo = (mode === "tunnel" || mode === "list" || resyncMode) ? argValue(args, "--repo") : undefined;
+  const requestedRepo =
+    mode === "tunnel" || mode === "cdp" || mode === "list" || resyncMode
+      ? argValue(args, "--repo")
+      : undefined;
   if (tunnelListMode && tunnelAllMode) {
     throw new Error("Cannot combine --list and --all in tunnel mode.");
   }
@@ -1546,6 +1673,16 @@ async function main() {
     "--opencode-remote-port",
     4096,
   );
+  const cdpLocalPort = parsePort(
+    argValue(args, "--cdp-local-port"),
+    "--cdp-local-port",
+    9222,
+  );
+  const cdpRemotePort = parsePort(
+    argValue(args, "--cdp-remote-port"),
+    "--cdp-remote-port",
+    9222,
+  );
   const opencodeSupervisor = parseOpencodeSupervisor(
     argValue(args, "--opencode-supervisor") ?? process.env.OPENCODE_SUPERVISOR,
   );
@@ -1560,7 +1697,8 @@ async function main() {
     explicitLocalPort: opencodeLocalPortExplicit ? parsedOpencodeLocalPort : undefined,
     fallbackLocalPort: parsedOpencodeLocalPort,
   });
-  const shouldResolveActivePort = mode === "tunnel" || !hasFlag(args, "--no-opencode-tunnel");
+  const shouldResolveActivePort =
+    mode === "tunnel" || (mode === "sync" && !hasFlag(args, "--no-opencode-tunnel"));
   const resolvedOpencodeLocalPort = shouldResolveActivePort
     ? await resolveTunnelLocalPort({
         config: existingConfig,
@@ -1730,6 +1868,30 @@ async function main() {
         },
         status: "active",
       })}`,
+    );
+    return;
+  }
+
+  if (mode === "cdp") {
+    const reverseTunnelCmd = buildCdpReverseTunnelCommand({
+      remote: opts.remote,
+      sshOpts: opts.sshOpts,
+      localPort: cdpLocalPort,
+      remotePort: cdpRemotePort,
+    });
+    if (opts.dryRun) {
+      console.log(`[dry-run] ${reverseTunnelCmd.join(" ")}`);
+      return;
+    }
+    await ensureLocalPortListeningForCdp(cdpLocalPort);
+    const tunnelStatus = await ensureBackgroundCdpReverseTunnel({
+      remote: opts.remote,
+      sshOpts: opts.sshOpts,
+      localPort: cdpLocalPort,
+      remotePort: cdpRemotePort,
+    });
+    console.log(
+      `[codebox] CDP reverse tunnel ${tunnelStatus}: remote ${opts.remote} localhost:${cdpLocalPort} -> 127.0.0.1:${cdpRemotePort}`,
     );
     return;
   }

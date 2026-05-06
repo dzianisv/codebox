@@ -52,6 +52,13 @@ codebox tunnel --list
 codebox tunnel --all
 ```
 
+Dedicated reverse CDP tunnel command (starts/reuses background reverse tunnel and returns):
+
+```sh
+codebox cdp
+codebox cdp --cdp-local-port 9333 --cdp-remote-port 9223
+```
+
 ## Notes
 
 - Requires `bun` (the CLI uses a `#!/usr/bin/env bun` shebang).
@@ -60,6 +67,7 @@ codebox tunnel --all
 - In `codebox ssh` mode, unknown flags are passed through to `ssh` (for example `-L`, `-R`, `-D`, `-N`, `-p`, `-i`).
 - `codebox tunnel` is the simplest way to pin the OpenCode tunnel in the background.
 - `codebox tunnel --repo <name>` lets you target a remembered repo from any working directory instead of implicitly using the current folder name.
+- `codebox cdp` creates a background reverse SSH tunnel from VM remote port back to your local Chrome CDP port (`-R remote:127.0.0.1:local`).
 - `codebox --resync` replays repo sync for remembered targets from `~/.config/codebox.json` (optionally filtered with `--repo <name>`).
 - In `--resync` mode, sibling repos are discovered as `<cwd-parent>/<repo>`; missing local paths are skipped with a clear message.
 - `codebox` now remembers synced/tunneled remote targets in `~/.config/codebox.json`, including VM hostname, repo, SSH opts, and the localhost OpenCode port mapping.
