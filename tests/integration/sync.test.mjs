@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,12 +13,22 @@ const goodOpencodeRepo = path.join(tempRepos, "opencode-good");
 const badOpencodeRepo = path.join(tempRepos, "opencode-bad");
 
 mkdirSync(path.join(tempHome, ".config", "opencode"), { recursive: true });
+mkdirSync(path.join(tempHome, ".config", "gws.profile"), { recursive: true });
 mkdirSync(path.join(tempHome, ".local", "share", "opencode"), { recursive: true });
+symlinkSync(
+  path.join(tempHome, ".config", "gws.profile"),
+  path.join(tempHome, ".config", "gws"),
+);
 
 writeFileSync(
   path.join(tempHome, ".config", "opencode", "opencode.json"),
   JSON.stringify({ provider: { "github-copilot": {} } }) + "\n",
 );
+writeFileSync(
+  path.join(tempHome, ".config", "gws.profile", "config.json"),
+  "{\n  \"project\": \"demo\"\n}\n",
+);
+writeFileSync(path.join(tempHome, ".config", "gws-state.json"), "{\"status\":\"ok\"}\n");
 writeFileSync(
   path.join(tempHome, ".local", "share", "opencode", "auth.json"),
   JSON.stringify({
@@ -111,6 +121,11 @@ try {
     `Default sync dry-run failed: ${defaultManagedOpencode.stderr || defaultManagedOpencode.stdout}`,
   );
   const defaultOut = `${defaultManagedOpencode.stdout}\n${defaultManagedOpencode.stderr}`;
+  assert.match(defaultOut, /prepare ~\/\.config\/gws dir: ssh /);
+  assert.match(defaultOut, /prepare ~\/\.config\/gws\.profile dir: ssh /);
+  assert.match(defaultOut, /sync ~\/\.config\/gws: rsync .* dev@host:~\/\.config\/gws\//);
+  assert.match(defaultOut, /sync ~\/\.config\/gws\.profile/);
+  assert.match(defaultOut, /sync ~\/\.config\/gws-state\.json/);
   assert.match(defaultOut, /OPENCODE_REPO_URL=\$'https:\/\/github\.com\/dzianisv\/opencode\.git'/);
   assert.match(defaultOut, /OPENCODE_REF=\$'dev'/);
   assert.match(defaultOut, /OPENCODE_SYNC_LOCAL_SOURCE=\$'0'/);
@@ -208,16 +223,16 @@ try {
   );
   assert.match(systemdOut, /bun run install:local/);
   assert.match(systemdOut, /bun run --cwd packages\/opencode install:local/);
-  assert.match(systemdOut, /if systemd_user_cmd is-active --quiet opencode-serve\.service; then/);
+  assert.match(systemdOut, /if systemd_user_cmd is-active --quiet opencode\.service; then/);
   assert.match(systemdOut, /OpenCode systemd service already active and healthy .* skipping restart/);
   assert.match(systemdOut, /OpenCode systemd service inactive; starting/);
-  assert.doesNotMatch(systemdOut, /systemd_user_cmd enable --now opencode-serve\.service/);
+  assert.doesNotMatch(systemdOut, /systemd_user_cmd enable --now opencode\.service/);
   assert.match(systemdOut, /WorkingDirectory=\$OPENCODE_DIR/);
   assert.match(
     systemdOut,
     /ExecStart=.*\$HOME\/\.local\/bin\/opencode.*\$HOME\/\.opencode\/bin\/opencode.*export OPENCODE_DISABLE_CHANNEL_DB="\$\{OPENCODE_DISABLE_CHANNEL_DB:-1\}".*exec "\\\$OPENCODE_BIN" serve --hostname "\$OPENCODE_HOSTNAME" --port 4096/,
   );
-  assert.match(systemdOut, /opencode-serve\.service/);
+  assert.match(systemdOut, /opencode\.service/);
   assert.match(systemdOut, /systemctl --user/);
 
   const withNohup = runSync([
@@ -245,6 +260,19 @@ try {
   );
   const withoutAuthOut = `${withoutAuth.stdout}\n${withoutAuth.stderr}`;
   assert.doesNotMatch(withoutAuthOut, /sync ~\/\.local\/share\/opencode\/auth\.json/);
+
+  const withoutGwsConfig = runSync(["--no-gws-config"]);
+  assert.equal(
+    withoutGwsConfig.status,
+    0,
+    `Sync dry-run without gws config failed: ${withoutGwsConfig.stderr || withoutGwsConfig.stdout}`,
+  );
+  const withoutGwsConfigOut = `${withoutGwsConfig.stdout}\n${withoutGwsConfig.stderr}`;
+  assert.doesNotMatch(withoutGwsConfigOut, /prepare ~\/\.config\/gws dir: ssh /);
+  assert.doesNotMatch(withoutGwsConfigOut, /prepare ~\/\.config\/gws\.profile dir: ssh /);
+  assert.doesNotMatch(withoutGwsConfigOut, /sync ~\/\.config\/gws: rsync/);
+  assert.doesNotMatch(withoutGwsConfigOut, /sync ~\/\.config\/gws\.profile/);
+  assert.doesNotMatch(withoutGwsConfigOut, /sync ~\/\.config\/gws-state\.json/);
 
   const badFork = runSync(["--opencode-src", badOpencodeRepo]);
   assert.notEqual(badFork.status, 0, "Expected sync to reject non-fork OpenCode source");

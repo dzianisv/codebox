@@ -1,6 +1,14 @@
 #!/usr/bin/env bun
 import { basename, resolve } from "node:path";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 
 type OpencodeSupervisor = "auto" | "nohup" | "systemd";
@@ -28,6 +36,7 @@ type Options = {
   syncOpencodeConfig: boolean;
   syncOpencodeAuth: boolean;
   syncGhConfig: boolean;
+  syncGwsConfig: boolean;
   syncCopilotConfig: boolean;
   syncKubeConfig: boolean;
   syncSshKeys: boolean;
@@ -108,6 +117,7 @@ Options:
   --no-opencode-config        Skip syncing ~/.config/opencode and ~/.opencode
   --no-opencode-auth          Skip syncing ~/.local/share/opencode auth state
   --no-gh-config              Skip syncing ~/.config/gh
+  --no-gws-config             Skip syncing ~/.config/gws*
   --no-copilot-config         Skip syncing ~/.config/github-copilot
   --no-kube-config            Skip syncing ~/.kube
   --sync-ssh                  Sync ~/.ssh (includes private keys) [off by default]
@@ -715,6 +725,7 @@ function parseSshModeArgs(rawArgs: string[]): ParsedSshModeArgs {
     "--no-opencode-config",
     "--no-opencode-auth",
     "--no-gh-config",
+    "--no-gws-config",
     "--sync-ssh",
     "--include-codex-history",
     "--no-env",
@@ -1729,6 +1740,7 @@ async function main() {
     syncOpencodeConfig,
     syncOpencodeAuth,
     syncGhConfig: !hasFlag(args, "--no-gh-config"),
+    syncGwsConfig: !hasFlag(args, "--no-gws-config"),
     syncCopilotConfig: !hasFlag(args, "--no-copilot-config"),
     syncKubeConfig: !hasFlag(args, "--no-kube-config"),
     syncSshKeys: hasFlag(args, "--sync-ssh"),
@@ -2071,6 +2083,74 @@ async function main() {
     }
   }
 
+  if (opts.syncGwsConfig) {
+    const configDir = resolve(os.homedir(), ".config");
+    if (existsSync(configDir)) {
+      for (const entry of readdirSync(configDir, { withFileTypes: true })) {
+        if (!entry.name.startsWith("gws")) continue;
+        const source = resolve(configDir, entry.name);
+        const isDir = entry.isDirectory();
+        const isFile = entry.isFile();
+        const isSymlink = entry.isSymbolicLink();
+        if (!isDir && !isFile && !isSymlink) continue;
+        let syncSource = source;
+        let syncDest = `${opts.remote}:~/.config/${entry.name}`;
+        let prepareDir = false;
+        if (isDir) {
+          syncSource = `${source}/`;
+          syncDest = `${opts.remote}:~/.config/${entry.name}/`;
+          prepareDir = true;
+        } else if (isSymlink) {
+          let resolvedSource: string;
+          try {
+            resolvedSource = realpathSync(source);
+          } catch {
+            continue;
+          }
+          let resolvedStats;
+          try {
+            resolvedStats = statSync(resolvedSource);
+          } catch {
+            continue;
+          }
+          if (resolvedStats.isDirectory()) {
+            syncSource = `${resolvedSource}/`;
+            syncDest = `${opts.remote}:~/.config/${entry.name}/`;
+            prepareDir = true;
+          } else if (resolvedStats.isFile()) {
+            syncSource = resolvedSource;
+            syncDest = `${opts.remote}:~/.config/${entry.name}`;
+          } else {
+            continue;
+          }
+        }
+        if (prepareDir) {
+          const targetAssign = `TARGET_PATH="$HOME/.config/"${bashQuote(entry.name)}`;
+          const prepareScript = `${targetAssign}; if [ -L "$TARGET_PATH" ] || { [ -e "$TARGET_PATH" ] && [ ! -d "$TARGET_PATH" ]; }; then rm -rf "$TARGET_PATH"; fi; mkdir -p "$TARGET_PATH"`;
+          actions.push({
+            label: `prepare ~/.config/${entry.name} dir`,
+            cmd: [
+              "ssh",
+              ...shellSplit(opts.sshOpts).map(expandTildeArg),
+              opts.remote,
+              `bash -lc ${bashQuote(prepareScript)}`,
+            ],
+          });
+        }
+        actions.push({
+          label: `sync ~/.config/${entry.name}`,
+          cmd: rsyncCmd(
+            opts.sshOpts,
+            syncSource,
+            syncDest,
+            [],
+            opts.verbose,
+          ),
+        });
+      }
+    }
+  }
+
   if (opts.syncCopilotConfig) {
     const copilotConfig = resolve(os.homedir(), ".config/github-copilot");
     if (existsSync(copilotConfig)) {
@@ -2335,6 +2415,10 @@ ensure_opencode_checkout() {
 }
 
 stop_opencode_runtime() {
+  if systemd_user_available && [ -f "$HOME/.config/systemd/user/opencode.service" ]; then
+    systemd_user_cmd stop opencode.service >/dev/null 2>&1 || true
+  fi
+  # Also stop old service name if still present
   if systemd_user_available && [ -f "$HOME/.config/systemd/user/opencode-serve.service" ]; then
     systemd_user_cmd stop opencode-serve.service >/dev/null 2>&1 || true
   fi
@@ -2650,10 +2734,12 @@ start_opencode_nohup() {
     echo "Info: OpenCode already listening on $OPENCODE_HOSTNAME:$OPENCODE_PORT"
     return 0
   fi
+  ensure_opencode_password
   mkdir -p "$HOME/.cache/codebox"
   if ! (
     cd "$OPENCODE_DIR" &&
     OPENCODE_DISABLE_CHANNEL_DB="\${OPENCODE_DISABLE_CHANNEL_DB:-1}" \
+    OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" \
     nohup "$OPENCODE_BIN" serve --hostname "$OPENCODE_HOSTNAME" --port "$OPENCODE_PORT" \
       > "$HOME/.cache/codebox/opencode-serve.log" 2>&1 &
   ); then
@@ -2663,9 +2749,20 @@ start_opencode_nohup() {
   echo "Info: started OpenCode serve via nohup on $OPENCODE_HOSTNAME:$OPENCODE_PORT (log: ~/.cache/codebox/opencode-serve.log)"
 }
 
+ensure_opencode_password() {
+  local password_dir="$HOME/.config/opencode"
+  local password_file="$password_dir/password.txt"
+  mkdir -p "$password_dir"
+  if [ ! -f "$password_file" ]; then
+    openssl rand -base64 24 | tr -d '/+=' | head -c 32 > "$password_file"
+  fi
+  chmod 600 "$password_file"
+  OPENCODE_SERVER_PASSWORD="$(cat "$password_file")"
+}
+
 write_opencode_systemd_unit() {
   mkdir -p "$HOME/.config/systemd/user" "$HOME/.cache/codebox"
-  local unit_path="$HOME/.config/systemd/user/opencode-serve.service"
+  local unit_path="$HOME/.config/systemd/user/opencode.service"
   local tmp_path="$unit_path.tmp.$$"
   cat > "$tmp_path" <<EOF
 [Unit]
@@ -2675,6 +2772,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+Environment=OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD
 WorkingDirectory=$OPENCODE_DIR
 ExecStart=/bin/bash -lc 'if [ -f "$HOME/.config/codebox/env.sh" ]; then . "$HOME/.config/codebox/env.sh"; fi; if [ -x "$HOME/.local/bin/opencode" ]; then OPENCODE_BIN="$HOME/.local/bin/opencode"; elif [ -x "$HOME/.opencode/bin/opencode" ]; then OPENCODE_BIN="$HOME/.opencode/bin/opencode"; else OPENCODE_BIN="$(command -v opencode)"; fi; export OPENCODE_DISABLE_CHANNEL_DB="\${OPENCODE_DISABLE_CHANNEL_DB:-1}"; exec "\\$OPENCODE_BIN" serve --hostname "$OPENCODE_HOSTNAME" --port ${opts.opencodeRemotePort}'
 Restart=always
@@ -2704,33 +2802,42 @@ start_opencode_systemd() {
   if ! systemd_user_available; then
     return 1
   fi
+  # Migrate from old service name
+  if [ -f "$HOME/.config/systemd/user/opencode-serve.service" ]; then
+    systemd_user_cmd stop opencode-serve.service >/dev/null 2>&1 || true
+    systemd_user_cmd disable opencode-serve.service >/dev/null 2>&1 || true
+    rm -f "$HOME/.config/systemd/user/opencode-serve.service"
+    systemd_user_cmd daemon-reload
+    echo "Info: migrated from opencode-serve.service to opencode.service"
+  fi
   ensure_linger_enabled
+  ensure_opencode_password
   OPENCODE_SYSTEMD_UNIT_CHANGED="0"
   write_opencode_systemd_unit
   if [ "$OPENCODE_SYSTEMD_UNIT_CHANGED" = "1" ]; then
     systemd_user_cmd daemon-reload
   fi
-  if systemd_user_cmd enable opencode-serve.service >/dev/null 2>&1; then
+  if systemd_user_cmd enable opencode.service >/dev/null 2>&1; then
     echo "Info: OpenCode systemd service enabled"
   else
     echo "Warning: failed to enable OpenCode systemd service; continuing with runtime start"
   fi
-  if systemd_user_cmd is-active --quiet opencode-serve.service; then
+  if systemd_user_cmd is-active --quiet opencode.service; then
     if [ "$OPENCODE_SYSTEMD_UNIT_CHANGED" = "1" ]; then
       echo "Info: restarting OpenCode systemd service to apply updated unit"
-      systemd_user_cmd restart opencode-serve.service >/dev/null
+      systemd_user_cmd restart opencode.service >/dev/null
     elif opencode_runtime_healthy; then
       echo "Info: OpenCode systemd service already active and healthy on $OPENCODE_HOSTNAME:$OPENCODE_PORT; skipping restart"
       return 0
     else
       echo "Info: OpenCode systemd service active but unhealthy; restarting"
-      systemd_user_cmd restart opencode-serve.service >/dev/null
+      systemd_user_cmd restart opencode.service >/dev/null
     fi
   else
     echo "Info: OpenCode systemd service inactive; starting"
-    systemd_user_cmd start opencode-serve.service >/dev/null
+    systemd_user_cmd start opencode.service >/dev/null
   fi
-  echo "Info: ensured OpenCode systemd user service opencode-serve.service"
+  echo "Info: ensured OpenCode systemd user service opencode.service"
 }
 
 TAILSCALE_IP="127.0.0.1"

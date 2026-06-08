@@ -89,9 +89,10 @@ codebox cdp --cdp-local-port 9333 --cdp-remote-port 9223
 - Use `--opencode-src <path>` only when you intentionally want a local checkout to override the managed remote checkout. If you do, its `origin` must still point at the same fork unless you intentionally override `--opencode-repo-url`.
 - When the fork checkout exposes an `install:local` hook, `codebox` installs that build on the VM and prefers `~/.local/bin/opencode` before any downloaded `~/.opencode/bin/opencode` channel binary.
 - Remote OpenCode startup defaults `OPENCODE_DISABLE_CHANNEL_DB=1` unless you override it, so switching between downloaded and repo-local builds keeps using the shared `opencode.db` state.
+- Remote OpenCode startup also ensures `~/.config/opencode/password.txt` exists, uses it for `OPENCODE_SERVER_PASSWORD`, and applies it to both `systemd` and `nohup` supervision.
 - When OpenCode config sync is enabled, `codebox` also syncs `~/.local/share/opencode/auth.json` so GitHub Copilot-backed remote sessions keep working.
 - Remote OpenCode supervision defaults to `systemd`; use `--opencode-supervisor auto|nohup|systemd` to override:
-  - `systemd` installs/refreshes `opencode-serve.service`, runs it from the remote OpenCode checkout, stops it before reinstalling `opencode`, and tries to enable user lingering
+  - `systemd` installs/refreshes `opencode.service`, runs it from the remote OpenCode checkout, stops it before reinstalling `opencode`, and tries to enable user lingering
   - `auto` prefers `systemd --user` and falls back to `nohup`
   - `nohup` keeps the one-shot background behavior, but still starts from the remote OpenCode checkout so repo-built frontend assets are served
 
