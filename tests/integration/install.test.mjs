@@ -87,7 +87,7 @@ try {
       /--base <path>\s+Remote base dir \(default: "\$HOME\/workspace"\)/,
     );
     assert.match(helpResult.stdout + helpResult.stderr, /--opencode-ref <branch\|sha>/);
-    assert.match(helpResult.stdout + helpResult.stderr, /default: "dev"/);
+    assert.match(helpResult.stdout + helpResult.stderr, /default: "main"/);
     assert.match(
       helpResult.stdout + helpResult.stderr,
       /--opencode-supervisor <m>\s+Remote OpenCode supervisor: auto\|nohup\|systemd \(default: systemd\)/,

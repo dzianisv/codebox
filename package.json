@@ -11,7 +11,10 @@
     "bin/codebox",
     "codebox.ts",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "supervisor.ts",
+    "supervisor-remote.ts",
+    "sync-state.ts"
   ],
   "engines": {
     "bun": ">=1.0.0"

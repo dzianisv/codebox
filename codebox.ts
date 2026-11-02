@@ -13,9 +13,11 @@ import os from "node:os";
 
 type OpencodeSupervisor = "auto" | "nohup" | "systemd";
 const DEFAULT_BASE = "$HOME/workspace";
-const DEFAULT_OPENCODE_REPO_URL = "https://github.com/dzianisv/opencode.git";
+const DEFAULT_OPENCODE_REPO_URL = "https://github.com/sst/opencode.git";
 const DEFAULT_PAPERCLIP_REPO_URL = "https://github.com/dzianisv/paperclip.git";
-const DEFAULT_OPENCODE_REF = "dev";
+const DEFAULT_OPENCODE_REF = "main";
+const DEFAULT_OPENCODE_PACKAGE = "opencode-ai";
+const DEFAULT_OPENCODE_VERSION = "latest";
 const DEFAULT_OPENCODE_SUPERVISOR: OpencodeSupervisor = "systemd";
 
 type Options = {
@@ -48,6 +50,7 @@ type Options = {
   assumeYes: boolean;
   verbose: boolean;
   dryRun: boolean;
+  syncOnly: boolean;
   configPath: string;
   syncPaperclip: boolean;
   paperclipRepoUrl: string;
@@ -98,9 +101,9 @@ Options:
   --base <path>               Remote base dir (default: "${DEFAULT_BASE}")
   --repo <name>               Tunnel/cdp/list/resync filter: remembered repo to target
   --resync                    Sync mode only: re-sync all remembered targets (optionally filtered by --repo)
-  --opencode-src <path>       Optional local opencode repo path to sync instead of managed remote checkout
-  --opencode-repo-url <url>   OpenCode git remote to anchor on the target (default: "${DEFAULT_OPENCODE_REPO_URL}")
-  --opencode-ref <branch|sha> OpenCode branch or commit for the managed remote checkout (default: "${DEFAULT_OPENCODE_REF}")
+  --opencode-src <path>       Optional local checkout to build instead of the upstream Bun package
+  --opencode-repo-url <url>   Local-source validation remote (default: "${DEFAULT_OPENCODE_REPO_URL}")
+  --opencode-ref <branch|sha> Local-source validation ref (default: "${DEFAULT_OPENCODE_REF}")
   --exclude <pattern>         Extra repo rsync exclude pattern (repeatable)
   --no-opencode-tunnel        Skip auto-starting localhost SSH tunnel to remote OpenCode
   --disable-tailscale         Skip Tailscale setup; OpenCode serves on 127.0.0.1 only
@@ -133,13 +136,14 @@ Options:
   --yes                       Assume yes for prompts (for example --sync-ssh private key sync)
   -v, --verbose               Verbose rsync output (progress)
   --dry-run                   Print actions without executing
+  --sync-only                 Sync repo/config files only; skip remote bootstrap, services and tunnel
 
 SSH mode:
   Unrecognized ssh-mode flags are passed through to ssh (for example: -L, -R, -D, -N, -p, -i).
 
 Example:
   ./codebox.ts --remote azureuser@dev-1
-  ./codebox.ts --remote azureuser@dev-1 --opencode-ref dev
+  ./codebox.ts --remote azureuser@dev-1 --opencode-ref main
   ./codebox.ts ssh azureuser@dev-1
   ./codebox.ts ssh
   ./codebox.ts ssh -L 4097:127.0.0.1:4097 -N
@@ -1752,6 +1756,7 @@ async function main() {
     assumeYes,
     verbose,
     dryRun: hasFlag(args, "--dry-run"),
+    syncOnly: hasFlag(args, "--sync-only"),
     configPath,
     syncPaperclip: !hasFlag(args, "--no-paperclip"),
     paperclipRepoUrl: parseNonEmptyOption(
@@ -1781,7 +1786,7 @@ async function main() {
     }
     if (canonicalGitRemoteUrl(localOriginUrl) !== canonicalGitRemoteUrl(opts.opencodeRepoUrl)) {
       throw new Error(
-        `Local OpenCode repo origin (${localOriginUrl}) does not match required fork (${opts.opencodeRepoUrl}).`,
+        `Local OpenCode repo origin (${localOriginUrl}) does not match required upstream remote (${opts.opencodeRepoUrl}).`,
       );
     }
   }
@@ -2261,6 +2266,8 @@ PAPERCLIP_DIR="$REMOTE_BASE/paperclip"
 PAPERCLIP_REPO_URL=${bashQuote(opts.paperclipRepoUrl)}
 OPENCODE_REPO_URL=${bashQuote(opts.opencodeRepoUrl)}
 OPENCODE_REF=${bashQuote(opts.opencodeRef)}
+OPENCODE_PACKAGE=${bashQuote(process.env.OPENCODE_PACKAGE ?? DEFAULT_OPENCODE_PACKAGE)}
+OPENCODE_VERSION=${bashQuote(process.env.OPENCODE_VERSION ?? DEFAULT_OPENCODE_VERSION)}
 OPENCODE_SYNC_LOCAL_SOURCE=${bashQuote(syncLocalOpencodeRepo ? "1" : "0")}
 OPENCODE_PORT=${bashQuote(String(opts.opencodeRemotePort))}
 OPENCODE_SUPERVISOR=${bashQuote(opts.opencodeSupervisor)}
@@ -2672,6 +2679,22 @@ start_chrome_cdp_systemd() {
   echo "Info: Chrome CDP service active on 127.0.0.1:$CHROME_CDP_PORT"
 }
 
+install_opencode_upstream() {
+  echo "Info: Installing upstream OpenCode $OPENCODE_PACKAGE@$OPENCODE_VERSION with Bun"
+  stop_opencode_runtime
+  if ! devbox run -- bash -lc 'export BUN_INSTALL="$HOME/.bun"; bun add --global "$OPENCODE_PACKAGE@$OPENCODE_VERSION"'; then
+    echo "Error: Bun failed to install upstream OpenCode $OPENCODE_PACKAGE@$OPENCODE_VERSION." >&2
+    return 1
+  fi
+  if [ ! -x "$HOME/.bun/bin/opencode" ]; then
+    echo "Error: expected upstream OpenCode binary at $HOME/.bun/bin/opencode." >&2
+    return 1
+  fi
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$HOME/.bun/bin/opencode" "$HOME/.local/bin/opencode"
+  "$HOME/.local/bin/opencode" --version
+}
+
 install_opencode_local() {
   local attempted=0
   local runtime_stopped=0
@@ -2854,13 +2877,8 @@ fi
 
 mkdir -p "$REPO_DIR" "$OPENCODE_DIR" ~/.config/opencode ~/.opencode ~/.codex ~/.config/gh ~/.local/bin ~/.local/share/opencode
 
-ensure_opencode_checkout
 cat > "$REPO_DIR/devbox.json" <<'EOF'
 ${devboxCodexJson}
-EOF
-
-cat > "$OPENCODE_DIR/devbox.json" <<'EOF'
-${devboxOpencodeJson}
 EOF
 
 cd "$REPO_DIR"
@@ -2872,7 +2890,11 @@ else
   echo "Info: skipping codex-cli build; codex-rs/Cargo.toml not found in $REPO_DIR"
 fi
 
-if [ -d "$OPENCODE_DIR" ]; then
+if [ "$OPENCODE_SYNC_LOCAL_SOURCE" = "1" ]; then
+  ensure_opencode_checkout
+  cat > "$OPENCODE_DIR/devbox.json" <<'EOF'
+${devboxOpencodeJson}
+EOF
   cd "$OPENCODE_DIR"
   devbox install
   if [ "$OPENCODE_REINSTALL" = "1" ]; then
@@ -2887,6 +2909,14 @@ if [ -d "$OPENCODE_DIR" ]; then
     if ! install_opencode_local; then
       echo "Warning: OpenCode local install failed; continuing bootstrap."
     fi
+  fi
+else
+  if [ "$OPENCODE_REINSTALL" = "1" ] || ! OPENCODE_BIN_EXISTING="$(resolve_opencode_bin)"; then
+    if ! install_opencode_upstream; then
+      echo "Warning: upstream OpenCode install failed; continuing bootstrap."
+    fi
+  else
+    echo "Info: OpenCode binary already present at $OPENCODE_BIN_EXISTING; skipping upstream install"
   fi
 fi
 
@@ -2999,11 +3029,15 @@ mkdir -p "$HOME/.local/share/opencode" "$HOME/.config/codebox"
     await run(a.cmd);
   }
 
+  if (opts.syncOnly) {
+    console.log("[codebox] --sync-only: skipping remote bootstrap and OpenCode tunnel");
+  } else {
   const sshCmd = ["ssh", ...sshArgs, opts.remote, "bash", "-s"];
   await run(sshCmd, { stdin: encoder.encode(remoteScript) });
+  }
 
   let tunnelStatus: "reused" | "started" | undefined;
-  if (opts.opencodeTunnel) {
+  if (opts.opencodeTunnel && !opts.syncOnly) {
     tunnelStatus = await ensureBackgroundTunnel({
       remote: opts.remote,
       sshOpts: opts.sshOpts,

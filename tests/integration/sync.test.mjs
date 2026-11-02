@@ -56,7 +56,7 @@ function initGitRepo(dir, originUrl) {
   assert.equal(addRemoteResult.status, 0, addRemoteResult.stderr || addRemoteResult.stdout);
 }
 
-initGitRepo(goodOpencodeRepo, "git@github.com:dzianisv/opencode.git");
+initGitRepo(goodOpencodeRepo, "git@github.com:sst/opencode.git");
 initGitRepo(badOpencodeRepo, "https://github.com/example/not-opencode.git");
 
 function runSync(args, options = {}) {
@@ -126,17 +126,16 @@ try {
   assert.match(defaultOut, /sync ~\/\.config\/gws: rsync .* dev@host:~\/\.config\/gws\//);
   assert.match(defaultOut, /sync ~\/\.config\/gws\.profile/);
   assert.match(defaultOut, /sync ~\/\.config\/gws-state\.json/);
-  assert.match(defaultOut, /OPENCODE_REPO_URL=\$'https:\/\/github\.com\/dzianisv\/opencode\.git'/);
-  assert.match(defaultOut, /OPENCODE_REF=\$'dev'/);
+  assert.match(defaultOut, /OPENCODE_REPO_URL=\$'https:\/\/github\.com\/sst\/opencode\.git'/);
+  assert.match(defaultOut, /OPENCODE_REF=\$'main'/);
+  assert.match(defaultOut, /OPENCODE_PACKAGE=\$'opencode-ai'/);
+  assert.match(defaultOut, /OPENCODE_VERSION=\$'latest'/);
   assert.match(defaultOut, /OPENCODE_SYNC_LOCAL_SOURCE=\$'0'/);
   assert.match(defaultOut, /OPENCODE_SUPERVISOR=\$'systemd'/);
-  assert.match(defaultOut, /git -C "\$OPENCODE_DIR" fetch --force --tags --prune origin/);
-  assert.match(
-    defaultOut,
-    /git -C "\$OPENCODE_DIR" checkout -B "\$OPENCODE_REF" "refs\/remotes\/origin\/\$OPENCODE_REF"/,
-  );
-  assert.match(defaultOut, /elif OPENCODE_BIN_EXISTING="\$\(resolve_opencode_bin\)"; then/);
-  assert.match(defaultOut, /OpenCode binary already present at \$OPENCODE_BIN_EXISTING; skipping local install hooks/);
+  assert.match(defaultOut, /install_opencode_upstream/);
+  assert.match(defaultOut, /bun add --global "\$OPENCODE_PACKAGE@\$OPENCODE_VERSION"/);
+  assert.match(defaultOut, /OpenCode binary already present at \$OPENCODE_BIN_EXISTING; skipping upstream install/);
+  assert.match(defaultOut, /if \[ "\$OPENCODE_REINSTALL" = "1" \] \|\| ! OPENCODE_BIN_EXISTING=/);
   assert.match(defaultOut, /if paperclip_runtime_healthy; then[\s\S]*skipping install\/start[\s\S]*install_paperclip/);
   assert.doesNotMatch(defaultOut, /sync opencode repo/);
 
@@ -210,8 +209,8 @@ try {
   const systemdOut = `${withSystemd.stdout}\n${withSystemd.stderr}`;
   assert.match(systemdOut, /sync ~\/\.config\/opencode/);
   assert.match(systemdOut, /sync ~\/\.local\/share\/opencode\/auth\.json/);
-  assert.match(systemdOut, /OPENCODE_REPO_URL=\$'https:\/\/github\.com\/dzianisv\/opencode\.git'/);
-  assert.match(systemdOut, /OPENCODE_REF=\$'dev'/);
+  assert.match(systemdOut, /OPENCODE_REPO_URL=\$'https:\/\/github\.com\/sst\/opencode\.git'/);
+  assert.match(systemdOut, /OPENCODE_REF=\$'main'/);
   assert.match(systemdOut, /OPENCODE_SYNC_LOCAL_SOURCE=\$'1'/);
   assert.match(systemdOut, /OPENCODE_SUPERVISOR=\$'systemd'/);
   assert.match(systemdOut, /git clone "\$OPENCODE_REPO_URL" "\$scratch_dir\/repo"/);
@@ -275,10 +274,10 @@ try {
   assert.doesNotMatch(withoutGwsConfigOut, /sync ~\/\.config\/gws-state\.json/);
 
   const badFork = runSync(["--opencode-src", badOpencodeRepo]);
-  assert.notEqual(badFork.status, 0, "Expected sync to reject non-fork OpenCode source");
+  assert.notEqual(badFork.status, 0, "Expected sync to reject non-upstream OpenCode source");
   assert.match(
     `${badFork.stdout}\n${badFork.stderr}`,
-    /does not match required fork/,
+    /does not match required upstream remote/,
   );
 
   const resyncWorkspace = mkdtempSync(path.join(tempRepos, "resync-workspace-"));

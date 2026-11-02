@@ -20,7 +20,7 @@ npm install -g .
 ```sh
 codebox --remote azureuser@dev-1
 codebox --remote azureuser@dev-1 --exclude '.android-sdk-fixed' --exclude '.gradle-home'
-codebox --remote azureuser@dev-1 --opencode-repo-url https://github.com/dzianisv/opencode.git --opencode-ref dev
+OPENCODE_VERSION=1.18.32 codebox --remote azureuser@dev-1
 codebox --remote azureuser@dev-1 --opencode-src ~/workspace/opencode
 codebox --resync --dry-run
 codebox --resync --repo codebox
@@ -84,15 +84,14 @@ codebox cdp --cdp-local-port 9333 --cdp-remote-port 9223
   - disable with `--no-opencode-tunnel`
   - override ports with `--opencode-local-port <n>` and `--opencode-remote-port <n>`
   - when the preferred local port is already occupied, `codebox` automatically picks the next free localhost port and remembers it for that remote target
-- The default OpenCode deployment source is the managed remote checkout of `https://github.com/dzianisv/opencode.git` at ref `dev`.
-- Use `--opencode-ref <branch|sha>` to deploy another branch or commit from that fork.
-- Use `--opencode-src <path>` only when you intentionally want a local checkout to override the managed remote checkout. If you do, its `origin` must still point at the same fork unless you intentionally override `--opencode-repo-url`.
-- When the fork checkout exposes an `install:local` hook, `codebox` installs that build on the VM and prefers `~/.local/bin/opencode` before any downloaded `~/.opencode/bin/opencode` channel binary.
+- The default OpenCode deployment installs the upstream `opencode-ai` npm package with Bun. Set `OPENCODE_VERSION` to pin a version; the default is `latest`.
+- Use `--opencode-src <path>` only when you intentionally want to build a local checkout. Its `origin` must point at `https://github.com/sst/opencode.git` unless you override `--opencode-repo-url`.
+- The upstream Bun install links `~/.bun/bin/opencode` to `~/.local/bin/opencode`; that path is preferred before any downloaded `~/.opencode/bin/opencode` channel binary.
 - Remote OpenCode startup defaults `OPENCODE_DISABLE_CHANNEL_DB=1` unless you override it, so switching between downloaded and repo-local builds keeps using the shared `opencode.db` state.
 - Remote OpenCode startup also ensures `~/.config/opencode/password.txt` exists, uses it for `OPENCODE_SERVER_PASSWORD`, and applies it to both `systemd` and `nohup` supervision.
 - When OpenCode config sync is enabled, `codebox` also syncs `~/.local/share/opencode/auth.json` so GitHub Copilot-backed remote sessions keep working.
 - Remote OpenCode supervision defaults to `systemd`; use `--opencode-supervisor auto|nohup|systemd` to override:
-  - `systemd` installs/refreshes `opencode.service`, runs it from the remote OpenCode checkout, stops it before reinstalling `opencode`, and tries to enable user lingering
+  - `systemd` installs/refreshes `opencode.service`, runs it from the remote OpenCode working directory, stops it before reinstalling `opencode`, and tries to enable user lingering
   - `auto` prefers `systemd --user` and falls back to `nohup`
   - `nohup` keeps the one-shot background behavior, but still starts from the remote OpenCode checkout so repo-built frontend assets are served
 
